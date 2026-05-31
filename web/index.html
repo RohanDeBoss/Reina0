@@ -94,7 +94,6 @@
       <div class="top-actions">
         <button id="undoButton" type="button">Undo</button>
         <button id="redoButton" type="button">Redo</button>
-        <button id="analyzeButton" type="button">Analyze</button>
         <button id="botButton" type="button">AI Move</button>
         <button id="newGameButton" class="primary" type="button">New Game</button>
       </div>
@@ -132,12 +131,24 @@
             <div><span>Depth</span><strong id="engineDepth">D0</strong></div>
             <div><span>Time</span><strong id="engineTime">0 ms</strong></div>
             <div><span>Nodes</span><strong id="engineNodes">0</strong></div>
+            <div><span>NPS</span><strong id="engineNps">-</strong></div>
           </div>
           <div class="pv-box">
-            <span>PV</span>
-            <strong id="enginePv">-</strong>
+            <div class="pv-header">
+              <span>PV</span>
+              <span class="pv-hint">Hover a move to preview on board</span>
+            </div>
+            <div id="enginePv" class="pv-moves"><span class="pv-empty">-</span></div>
           </div>
           <div id="engineDepths" class="engine-depths"></div>
+          <!-- analyzeControls: hidden automatically in ponder mode or ai-ai (analysis is automatic) -->
+          <div id="analyzeControls" class="analyze-controls">
+            <button id="analyzeButton" type="button">Analyze</button>
+            <label class="check-row">
+              <input id="infiniteAnalysisToggle" type="checkbox">
+              <span>Infinite analysis loop</span>
+            </label>
+          </div>
         </section>
 
         <section class="panel">

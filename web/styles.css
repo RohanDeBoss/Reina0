@@ -134,6 +134,13 @@ input[type="checkbox"] {
   margin-top: 6px;
 }
 
+/* Ponder row: pointer-events are controlled by JS via inline style.
+   The opacity-only dimming was insufficient — clicks still registered. */
+#ponderRow[style*="pointer-events: none"],
+#ponderRow[style*="pointer-events:none"] {
+  user-select: none;
+}
+
 .setup-actions {
   display: flex;
   justify-content: flex-end;
@@ -337,7 +344,6 @@ input[type="checkbox"] {
 .quick-stats,
 .engine-summary {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--line-soft);
@@ -345,8 +351,13 @@ input[type="checkbox"] {
   background: var(--line-soft);
 }
 
+.quick-stats {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* Engine summary: 5 cells — wrap at narrow widths */
 .engine-summary {
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
 }
 
 .quick-stats div,
@@ -371,7 +382,8 @@ input[type="checkbox"] {
   margin-top: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 17px;
+  white-space: nowrap;
+  font-size: 14px;
 }
 
 .history-header {
@@ -390,6 +402,7 @@ input[type="checkbox"] {
   font-weight: 850;
 }
 
+/* PV box */
 .pv-box {
   display: grid;
   gap: 6px;
@@ -400,19 +413,67 @@ input[type="checkbox"] {
   background: #101722;
 }
 
-.pv-box span {
+.pv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pv-header span:first-child {
   color: var(--muted);
   font-size: 11px;
   font-weight: 900;
+  text-transform: uppercase;
 }
 
-.pv-box strong {
-  min-height: 22px;
-  overflow-wrap: anywhere;
-  font-family: "Cascadia Mono", Consolas, monospace;
+.pv-hint {
+  color: #5a6e87;
+  font-size: 11px;
+  font-style: italic;
+}
+
+.pv-moves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 28px;
+  align-items: flex-start;
+}
+
+.pv-empty {
+  color: var(--muted);
   font-size: 13px;
+  font-family: "Cascadia Mono", Consolas, monospace;
 }
 
+/* PV move chips */
+.pv-chip {
+  display: inline-block;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #182030;
+  color: #c0d0e0;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+  cursor: default;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.pv-chip-hoverable {
+  cursor: pointer;
+}
+
+.pv-chip-hoverable:hover {
+  border-color: var(--green);
+  background: #1a3030;
+  color: var(--green);
+}
+
+/* Depth table */
 .engine-depths {
   display: grid;
   gap: 6px;
@@ -421,20 +482,33 @@ input[type="checkbox"] {
 
 .engine-depth-row {
   display: grid;
-  grid-template-columns: 40px 64px 70px 1fr;
-  gap: 8px;
+  grid-template-columns: 36px 56px 62px 72px 72px 1fr;
+  gap: 6px;
   align-items: center;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: #111824;
   color: var(--muted);
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .engine-depth-row strong {
   color: var(--text);
+}
+
+.depth-nps {
+  color: #6a8aaa;
+  font-size: 10px;
+}
+
+.depth-pv {
+  color: #5a7090;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .engine-empty,
@@ -551,6 +625,16 @@ input[type="range"] {
   font-size: 12px;
 }
 
+/* Analyze controls strip at bottom of engine panel.
+   Hidden automatically by JS when ponder is active or in ai-ai mode. */
+.analyze-controls {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 1080px) {
   body {
     overflow: auto;
@@ -601,9 +685,21 @@ input[type="range"] {
   .engine-setup-grid,
   .button-grid,
   .toggle-grid,
-  .quick-stats,
-  .engine-summary {
+  .quick-stats {
     grid-template-columns: 1fr;
+  }
+
+  .engine-summary {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .engine-depth-row {
+    grid-template-columns: 36px 56px 62px 1fr;
+  }
+
+  .depth-nps,
+  .depth-pv {
+    display: none;
   }
 
   .board-banner {

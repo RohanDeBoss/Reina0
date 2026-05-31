@@ -308,8 +308,10 @@ class Reina0():
             "depths": [],
             "nodes": 0,
             "pv": [],
+            "pvMoves": [],   # list of raw move tuples for the full PV line
             "candidates": [],
             "elapsedMs": 0,
+            "nps": 0,
         }
         self.telemetry_callback = telemetry_callback
         self.verbose = verbose
@@ -323,6 +325,8 @@ class Reina0():
         self.zobrist_table = defaultdict(lambda: random.getrandbits(64))
         # Running memory of the board
         self.current_hash = 0
+        # PV table: hash -> best_move for PV line reconstruction
+        self.pv_table = {}
     # Get cells from cell pool
     def acquire_cell(self, x, y, color):
         c = self.cell_pool.pop()
@@ -369,7 +373,7 @@ class Reina0():
                     if (x, y) not in seen and (x, y) not in occupied:
                         self.legalcoords.append((x, y))
                         seen.add((x, y))
-    # Sees which cells are affected by the new cwlls placed
+    # Sees which cells are affected by the new cells placed
     def affected_cells(self, i, j):
         affected = set()
         for cell in (i, j):
@@ -439,7 +443,7 @@ class Reina0():
         cached_moves = [] 
         
         cached_set = set(cached_keys) if cached_keys else set()
-        # Currrent color it's branching with
+        # Current color it's branching with
         playercolor = "blue" if self.color == "orange" else "orange"
         current_color = self.color if maxplayer else playercolor
         
@@ -503,7 +507,7 @@ class Reina0():
                 # Heuristic prune
                 (x1, y1), (x2, y2) = fingerprint
                 
-                # Checks defensive and ofensive threats
+                # Checks defensive and offensive threats
                 is_defensive = (y1 in threat_y_lines or y2 in threat_y_lines) or \
                                (x1 in threat_x_lines or x2 in threat_x_lines) or \
                                ((x1-y1) in threat_z_lines or (x2-y2) in threat_z_lines)
@@ -588,13 +592,48 @@ class Reina0():
             childupdated[pair_tuple] = score
         # Returns list of top moves
         return childupdated
+
+    def extract_pv_line(self, root_hash, root_bot, max_depth=8):
+        """Walk the PV table to reconstruct the full principal variation line."""
+        pv_moves = []
+        visited = set()
+        current_hash = root_hash
+        current_bot = root_bot
+
+        for _ in range(max_depth):
+            state_key = (current_hash, current_bot)
+            if state_key in visited:
+                break
+            visited.add(state_key)
+
+            entry = self.pv_table.get(state_key)
+            if entry is None:
+                break
+            move = entry
+            if move is None or move == "StandPat":
+                break
+            try:
+                (x1, y1), (x2, y2) = move
+            except (TypeError, ValueError):
+                break
+            pv_moves.append(move)
+            # Update hash for next ply
+            current_color = self.color if current_bot else (
+                "blue" if self.color == "orange" else "orange"
+            )
+            current_hash ^= self.zobrist_table[(x1, y1, current_color)]
+            current_hash ^= self.zobrist_table[(x2, y2, current_color)]
+            current_bot = not current_bot
+
+        return pv_moves
+
     # Alpha-beta pruning
     def alphabetaupdated(self, bot, depth, alpha, beta, on_pv=False):
         self.search_stats["nodes"] = self.search_stats.get("nodes", 0) + 1
         cached_ordered_keys = []
         state = (self.current_hash, bot)
         
-        # Zobrist cache unpaching
+        # Zobrist cache unpacking
         if state in self.transposition_table:
             stored = self.transposition_table[state]
             stored_depth = stored[0]
@@ -666,6 +705,7 @@ class Reina0():
             self.themove = random.choice(opening_moves)
             self.last_score = 0
             self.search_stats["pv"] = [self.format_move(self.themove)]
+            self.search_stats["pvMoves"] = [self.themove]
             self.search_stats["candidates"] = [{"score": 0, "move": self.format_move(self.themove)}]
             return
         else: 
@@ -730,14 +770,19 @@ class Reina0():
                         returneval = self.alphabetaupdated(False, depth - 1, alpha, beta, on_pv=should_cache)[1]
                         
                     Ordered.append([returneval, item])
-                    alpha = max(alpha, returneval)
+                    if returneval > alpha:
+                        alpha = returneval
+                        # Update PV table for this position
+                        self.pv_table[state] = item
                 else:
                     returneval = self.alphabetaupdated(True, depth - 1 - reduction, alpha, beta, on_pv=should_cache)[1]
                     if reduction > 0 and returneval < beta:
                         returneval = self.alphabetaupdated(True, depth - 1, alpha, beta, on_pv=should_cache)[1]
                         
                     Ordered.append([returneval, item])
-                    beta = min(beta, returneval)
+                    if returneval < beta:
+                        beta = returneval
+                        self.pv_table[state] = item
 
                 # Cleanup and release
                 del self.hypocellsplaced[string1]
@@ -770,7 +815,17 @@ class Reina0():
             best_score = Ordered[0][0]
             best_key = Ordered[0][1]
             self.last_score = best_score
-            self.search_stats["pv"] = [self.format_move(best_key)]
+            # Update PV table at root
+            self.pv_table[state] = best_key
+            # Extract full PV line from PV table
+            pv_line = self.extract_pv_line(self.current_hash, True, max_depth=self.movecheck + 2)
+            if not pv_line:
+                pv_line = [best_key]
+            self.search_stats["pv"] = [self.format_move(m) for m in pv_line]
+            self.search_stats["pvMoves"] = [
+                [{"x": m[0][0], "y": m[0][1]}, {"x": m[1][0], "y": m[1][1]}]
+                for m in pv_line
+            ]
             self.search_stats["candidates"] = [
                 {"score": score, "move": self.format_move(move)}
                 for score, move in Ordered[:5]
@@ -782,9 +837,16 @@ class Reina0():
             self.themove = best_key 
             return self.themove
         else:
-            best_score = Ordered[0][0]
+            if Ordered:
+                best_score = Ordered[0][0]
+                best_key = Ordered[0][1]
+                # Update PV table for non-root nodes too
+                self.pv_table[state] = best_key
+            else:
+                best_score = statictotaleval
             self.transposition_table[state] = (depth, best_score, list(Ordered))
             return [Ordered, best_score]
+
     def format_move(self, move):
         if move == "StandPat":
             return "Stand Pat"
@@ -798,6 +860,48 @@ class Reina0():
         if self.telemetry_callback:
             self.telemetry_callback(dict(self.search_stats))
 
+    def immediate_win_move(self, color):
+        self.legalMoves()
+        active_coords = list(self.legalcoords)
+        board = self.hypocellsplaced
+
+        for idx, first in enumerate(active_coords):
+            for second in active_coords[idx + 1:]:
+                (x1, y1), (x2, y2) = tuple(sorted((first, second)))
+                c1 = self.acquire_cell(x1, y1, color)
+                c2 = self.acquire_cell(x2, y2, color)
+                affected = self.affected_cells(c1, c2)
+                snapshot = self.snapshots(board, affected)
+
+                board["mate1"] = c1
+                board["mate2"] = c2
+                add_to_index(self, c1, "mate1")
+                add_to_index(self, c2, "mate2")
+                mark_dirty_multiple(self, [c1, c2], self.by_x, self.by_y, self.by_z)
+
+                winning = False
+                for key in affected:
+                    existing = board[key]
+                    if existing.color == color:
+                        existing.checkcells(self.by_x, self.by_y, self.by_z)
+                        if existing.sixinarow:
+                            winning = True
+                            break
+                c1.checkcells(self.by_x, self.by_y, self.by_z)
+                c2.checkcells(self.by_x, self.by_y, self.by_z)
+                winning = winning or c1.sixinarow or c2.sixinarow
+
+                remove_from_index(self, c1)
+                remove_from_index(self, c2)
+                del board["mate1"]
+                del board["mate2"]
+                self.retrieve_snapshot(board, snapshot)
+                self.release_cells([c1, c2])
+
+                if winning:
+                    return ((x1, y1), (x2, y2))
+        return None
+
     # Calling Alphabetaupdated()
     def alphabetacalls(self, depth, time_limit_ms=0):
         started = time.perf_counter()
@@ -810,35 +914,97 @@ class Reina0():
             "depths": [],
             "nodes": 0,
             "pv": [],
+            "pvMoves": [],
             "candidates": [],
             "elapsedMs": 0,
+            "nps": 0,
             "timeLimitMs": time_limit_ms,
         }
         self.emit_telemetry()
+        mate_move = self.immediate_win_move(self.color)
+        if mate_move:
+            self.themove = mate_move
+            self.last_score = 10000000
+            elapsed = int((time.perf_counter() - started) * 1000)
+            nodes = self.search_stats["nodes"]
+            nps = int(nodes / (elapsed / 1000)) if elapsed > 0 else nodes
+            self.search_stats["pv"] = [self.format_move(mate_move)]
+            self.search_stats["pvMoves"] = [[{"x": mate_move[0][0], "y": mate_move[0][1]}, {"x": mate_move[1][0], "y": mate_move[1][1]}]]
+            self.search_stats["candidates"] = [{"score": self.last_score, "move": self.format_move(mate_move)}]
+            self.search_stats["depths"].append({
+                "depth": 1,
+                "timeMs": elapsed,
+                "nodes": nodes,
+                "score": self.last_score,
+                "pv": list(self.search_stats["pv"]),
+                "nps": nps,
+            })
+            self.search_stats["running"] = False
+            self.search_stats["elapsedMs"] = elapsed
+            self.search_stats["nps"] = nps
+            self.emit_telemetry()
+            return
+
+        enemy_color = "blue" if self.color == "orange" else "orange"
+        enemy_mate = self.immediate_win_move(enemy_color)
+        if enemy_mate:
+            self.themove = enemy_mate
+            self.last_score = -500000
+            elapsed = int((time.perf_counter() - started) * 1000)
+            nodes = self.search_stats["nodes"]
+            nps = int(nodes / (elapsed / 1000)) if elapsed > 0 else nodes
+            self.search_stats["pv"] = [self.format_move(enemy_mate)]
+            self.search_stats["pvMoves"] = [[{"x": enemy_mate[0][0], "y": enemy_mate[0][1]}, {"x": enemy_mate[1][0], "y": enemy_mate[1][1]}]]
+            self.search_stats["candidates"] = [{"score": self.last_score, "move": self.format_move(enemy_mate)}]
+            self.search_stats["depths"].append({
+                "depth": 1,
+                "timeMs": elapsed,
+                "nodes": nodes,
+                "score": self.last_score,
+                "pv": list(self.search_stats["pv"]),
+                "nps": nps,
+            })
+            self.search_stats["running"] = False
+            self.search_stats["elapsedMs"] = elapsed
+            self.search_stats["nps"] = nps
+            self.emit_telemetry()
+            return
+
         self.current_hash = 0
         for c in self.hypocellsplaced.values():
-            # State is defined by its X, Y, and Color
             state_tuple = (c.x, c.y, c.color)
             self.current_hash ^= self.zobrist_table[state_tuple]
+
+        nodes_at_start = 0
         for i in range(depth):
             dturn = i + 1
             depth_started = time.perf_counter()
             nodes_before = self.search_stats["nodes"]
             self.alphabetaupdated(True, dturn, float("-inf"), float("inf"))
             depth_time = time.perf_counter() - depth_started
-            self.search_stats["elapsedMs"] = int((time.perf_counter() - started) * 1000)
+            elapsed_total = int((time.perf_counter() - started) * 1000)
+            self.search_stats["elapsedMs"] = elapsed_total
+            depth_nodes = self.search_stats["nodes"] - nodes_before
+            depth_nps = int(depth_nodes / depth_time) if depth_time > 0 else depth_nodes
+            total_nps = int(self.search_stats["nodes"] / (elapsed_total / 1000)) if elapsed_total > 0 else self.search_stats["nodes"]
+            self.search_stats["nps"] = total_nps
             self.search_stats["depths"].append({
                 "depth": dturn,
                 "timeMs": int(depth_time * 1000),
-                "nodes": self.search_stats["nodes"] - nodes_before,
+                "nodes": depth_nodes,
                 "score": self.last_score,
                 "pv": list(self.search_stats.get("pv", [])),
+                "pvMoves": list(self.search_stats.get("pvMoves", [])),
+                "nps": depth_nps,
             })
             self.emit_telemetry()
-            if time_limit_ms and self.search_stats["elapsedMs"] >= time_limit_ms:
+            if time_limit_ms and elapsed_total >= time_limit_ms:
                 break
         self.search_stats["running"] = False
-        self.search_stats["elapsedMs"] = int((time.perf_counter() - started) * 1000)
+        elapsed_final = int((time.perf_counter() - started) * 1000)
+        self.search_stats["elapsedMs"] = elapsed_final
+        total_nodes = self.search_stats["nodes"]
+        self.search_stats["nps"] = int(total_nodes / (elapsed_final / 1000)) if elapsed_final > 0 else total_nodes
         self.emit_telemetry()
     # The bot's turn
     def boturn(self):
@@ -854,4 +1020,3 @@ class Reina0():
         if self.verbose:
             print(self.themove[0][0], self.themove[0][1], self.themove[1][0], self.themove[1][1])
         mark_dirty_multiple(self, [c1, c2], self.by_x, self.by_y, self.by_z)
-

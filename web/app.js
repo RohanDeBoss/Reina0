@@ -35,13 +35,13 @@ const els = {
   engineDepth: document.getElementById("engineDepth"),
   engineTime: document.getElementById("engineTime"),
   engineNodes: document.getElementById("engineNodes"),
+  engineNps: document.getElementById("engineNps"),
   enginePv: document.getElementById("enginePv"),
   engineDepths: document.getElementById("engineDepths"),
   undoButton: document.getElementById("undoButton"),
   redoButton: document.getElementById("redoButton"),
   undoRoundButton: document.getElementById("undoRoundButton"),
   botButton: document.getElementById("botButton"),
-  analyzeButton: document.getElementById("analyzeButton"),
   newGameButton: document.getElementById("newGameButton"),
   commitButton: document.getElementById("commitButton"),
   clearSelectionButton: document.getElementById("clearSelectionButton"),
@@ -55,18 +55,29 @@ const els = {
   latestToggle: document.getElementById("latestToggle"),
   resetViewButton: document.getElementById("resetViewButton"),
   centerPiecesButton: document.getElementById("centerPiecesButton"),
-  historyList: document.getElementById("historyList")
+  historyList: document.getElementById("historyList"),
+  // Analysis controls in the engine panel
+  analyzeButton: document.getElementById("analyzeButton"),
+  infiniteAnalysisToggle: document.getElementById("infiniteAnalysisToggle"),
+  analyzeControls: document.getElementById("analyzeControls"),
 };
 
 let state = null;
 let cellMap = new Map();
 let selected = [];
 let hoverCell = null;
-let searchBusy = false;
+// Separate busy flags: moveBusy blocks player actions; analysisBusy does not
+let moveBusy = false;
+let analysisBusy = false;
 let gameStarted = false;
 let toastTimer = null;
 let searchPollTimer = null;
 let automationTimer = null;
+
+// PV hover state: index into pvMoves array (-1 = none)
+let pvHoverIndex = -1;
+// pvMoves from latest search stats: array of [{x,y},{x,y}] pairs
+let pvMoves = [];
 
 const settings = {
   hexSize: 34,
@@ -75,7 +86,8 @@ const settings = {
   showHeat: false,
   showLatest: true,
   autoSubmit: true,
-  autoAi: true
+  autoAi: true,
+  infiniteAnalysis: false,
 };
 
 const view = {
@@ -173,6 +185,17 @@ function isLatest(cell) {
   return latest.cells.some((item) => item.x === cell.x && item.y === cell.y);
 }
 
+// Returns the 0-based PV move index that this coord belongs to, or -1
+function pvMoveIndexFor(x, y) {
+  for (let i = 0; i < pvMoves.length; i++) {
+    const pair = pvMoves[i];
+    if (pair && pair.some((c) => c.x === x && c.y === y)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 function hexPath(cx, cy, radius) {
   ctx.beginPath();
   for (let i = 0; i < 6; i += 1) {
@@ -255,6 +278,50 @@ function drawPiece(cell) {
   }
 }
 
+// Draw a ghost/preview hex for PV moves (faded color, not placed on board)
+function drawPvGhost(x, y, color, pvIndex, isHovered) {
+  const center = cellToScreen({ x, y });
+  const radius = activeSize() * 0.78;
+  if (
+    center.x < -radius * 2 ||
+    center.y < -radius * 2 ||
+    center.x > canvas.clientWidth + radius * 2 ||
+    center.y > canvas.clientHeight + radius * 2
+  ) {
+    return;
+  }
+
+  const blue = color === "blue";
+  // Fade by depth in PV: first move is most opaque
+  const baseAlpha = isHovered ? 0.55 : 0.22;
+  const alphaStep = isHovered ? 0.06 : 0.035;
+  const alpha = Math.max(0.08, baseAlpha - pvIndex * alphaStep);
+
+  hexPath(center.x, center.y, radius);
+  ctx.fillStyle = blue
+    ? `rgba(71, 200, 255, ${alpha})`
+    : `rgba(255, 194, 61, ${alpha})`;
+  ctx.fill();
+
+  const strokeAlpha = Math.max(0.12, alpha * 1.6);
+  ctx.lineWidth = isHovered ? 2.5 : 1.5;
+  ctx.strokeStyle = blue
+    ? `rgba(200, 240, 255, ${strokeAlpha})`
+    : `rgba(255, 235, 160, ${strokeAlpha})`;
+  ctx.stroke();
+
+  // Draw move number label inside ghost
+  if (activeSize() >= 22) {
+    ctx.fillStyle = blue
+      ? `rgba(200, 240, 255, ${Math.min(1, alpha * 3)})`
+      : `rgba(255, 235, 160, ${Math.min(1, alpha * 3)})`;
+    ctx.font = `bold ${Math.max(9, Math.floor(activeSize() * 0.28))}px Cascadia Mono, Consolas, monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${pvIndex + 1}`, center.x, center.y);
+  }
+}
+
 function draw() {
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -310,6 +377,29 @@ function draw() {
       lineWidth: 3,
       scale: 0.98
     });
+  }
+
+  // Draw PV ghost pieces — only show up to pvHoverIndex+1 moves when hovering,
+  // otherwise show all moves at low opacity
+  if (pvMoves.length > 0) {
+    const showCount = pvHoverIndex >= 0 ? pvHoverIndex + 1 : pvMoves.length;
+    // Determine color of next move (after current board state)
+    let pvColor = state.nextColor;
+    const occupiedKeys = new Set(state.cells.map((c) => coordKey(c.x, c.y)));
+
+    for (let i = 0; i < showCount; i++) {
+      const pair = pvMoves[i];
+      if (!pair) break;
+      const isHovered = (i === pvHoverIndex);
+      // Alternate colors each move
+      const moveColor = i % 2 === 0 ? pvColor : (pvColor === "blue" ? "orange" : "blue");
+      for (const pt of pair) {
+        // Don't draw ghost on top of a real piece
+        if (!occupiedKeys.has(coordKey(pt.x, pt.y))) {
+          drawPvGhost(pt.x, pt.y, moveColor, i, isHovered);
+        }
+      }
+    }
   }
 
   for (const cell of state.cells) {
@@ -380,14 +470,21 @@ function syncSetupFields() {
   const mode = els.setupMode.value;
   els.humanSideField.style.display = mode === "ai-ai" ? "none" : "grid";
   els.setupHumanColor.disabled = mode !== "human-ai";
-  els.setupPonderToggle.disabled = mode !== "human-human";
-  els.ponderRow.style.opacity = mode === "human-human" ? "1" : "0.45";
+  // Ponder only makes sense in human-human; visually disable + block interaction otherwise
+  const ponderAllowed = mode === "human-human";
+  els.setupPonderToggle.disabled = !ponderAllowed;
+  els.ponderRow.style.opacity = ponderAllowed ? "1" : "0.45";
+  els.ponderRow.style.pointerEvents = ponderAllowed ? "" : "none";
 }
 
 function applyState(nextState) {
   state = nextState;
   cellMap = new Map(state.cells.map((cell) => [coordKey(cell.x, cell.y), cell]));
   selected = selected.filter((cell) => !cellMap.has(coordKey(cell.x, cell.y)));
+  // Sync pvMoves from state search
+  if (state.search && state.search.pvMoves) {
+    pvMoves = state.search.pvMoves;
+  }
   syncControls();
   draw();
   scheduleAutomation();
@@ -431,18 +528,35 @@ function formatMs(ms) {
   return `${ms} ms`;
 }
 
+function formatNps(nps) {
+  if (!nps || nps === 0) return "-";
+  if (nps >= 1000000) return `${(nps / 1000000).toFixed(2)} Mn/s`;
+  if (nps >= 1000) return `${(nps / 1000).toFixed(1)} kn/s`;
+  return `${nps} n/s`;
+}
+
 function renderSearchStats(search = {}) {
   const depths = search.depths || [];
   const latestDepth = depths.length ? depths[depths.length - 1] : null;
   const pv = (search.pv && search.pv.length ? search.pv : latestDepth && latestDepth.pv) || [];
+  const pvMovesData = search.pvMoves || (latestDepth && latestDepth.pvMoves) || [];
   const running = search.running || search.threadRunning;
+
+  // Update pvMoves for board rendering
+  if (pvMovesData.length > 0) {
+    pvMoves = pvMovesData;
+  }
 
   els.engineStatus.textContent = running ? (search.kind === "analysis" ? "Analyzing" : "Thinking") : "Idle";
   els.engineSide.textContent = prettyColor(search.side);
   els.engineDepth.textContent = latestDepth ? `D${latestDepth.depth}` : "D0";
   els.engineTime.textContent = formatMs(search.elapsedMs);
   els.engineNodes.textContent = Number(search.nodes || 0).toLocaleString();
-  els.enginePv.textContent = pv.length ? pv.join("  ") : "-";
+  els.engineNps.textContent = formatNps(search.nps || (latestDepth && latestDepth.nps));
+
+  // Render multi-move PV as hoverable chips
+  renderPvChips(pv, pvMovesData);
+
   els.scoreStat.textContent = formatScore(latestDepth ? latestDepth.score : state && state.lastScore);
 
   if (depths.length === 0) {
@@ -454,15 +568,52 @@ function renderSearchStats(search = {}) {
     .slice()
     .reverse()
     .slice(0, 10)
-    .map((item) => `
+    .map((item) => {
+      const depthPv = (item.pv || []).slice(0, 3).join("  ");
+      const npsStr = formatNps(item.nps);
+      return `
       <div class="engine-depth-row">
         <span>D${item.depth}</span>
         <strong>${formatScore(item.score)}</strong>
         <span>${formatMs(item.timeMs)}</span>
         <span>${Number(item.nodes || 0).toLocaleString()} n</span>
+        <span class="depth-nps">${npsStr}</span>
+        <span class="depth-pv">${depthPv || "-"}</span>
       </div>
-    `)
+    `;
+    })
     .join("");
+}
+
+function renderPvChips(pv, pvMovesData) {
+  if (!pv || pv.length === 0) {
+    els.enginePv.innerHTML = '<span class="pv-empty">-</span>';
+    return;
+  }
+
+  const html = pv.map((moveStr, i) => {
+    const hasMoves = pvMovesData && pvMovesData[i];
+    return `<span
+      class="pv-chip${hasMoves ? " pv-chip-hoverable" : ""}"
+      data-pv-index="${i}"
+      title="${moveStr}"
+    >${i + 1}. ${moveStr}</span>`;
+  }).join(" ");
+
+  els.enginePv.innerHTML = html;
+
+  // Attach hover handlers
+  els.enginePv.querySelectorAll(".pv-chip-hoverable").forEach((chip) => {
+    const idx = Number(chip.dataset.pvIndex);
+    chip.addEventListener("mouseenter", () => {
+      pvHoverIndex = idx;
+      draw();
+    });
+    chip.addEventListener("mouseleave", () => {
+      pvHoverIndex = -1;
+      draw();
+    });
+  });
 }
 
 function syncSetupFromState() {
@@ -480,6 +631,19 @@ function syncSetupFromState() {
   els.orangeTimeInput.value = msToSeconds(state.sideSettings?.orange?.timeMs || 0);
   els.setupPonderToggle.checked = Boolean(state.ponder);
   syncSetupFields();
+}
+
+// Returns true if ponder analysis should run automatically right now
+function shouldAutoPonder() {
+  return (
+    gameStarted &&
+    state &&
+    !state.gameOver &&
+    !moveBusy &&
+    !analysisBusy &&
+    state.ponder &&
+    state.mode === "human-human"
+  );
 }
 
 function syncControls() {
@@ -506,9 +670,12 @@ function syncControls() {
   } else if (state.gameOver) {
     els.bannerTitle.textContent = `${prettyColor(state.winner)} wins`;
     els.bannerSub.textContent = "Start a new game or undo.";
-  } else if (searchBusy) {
+  } else if (moveBusy) {
     els.bannerTitle.textContent = state.search?.kind === "analysis" ? "Analysis running" : "AI thinking";
     els.bannerSub.textContent = "Engine output is updating in the side panel.";
+  } else if (analysisBusy) {
+    els.bannerTitle.textContent = "Analysis running";
+    els.bannerSub.textContent = `${prettyColor(state.nextColor)} to move — analysis running in background.`;
   } else if (state.botPending) {
     els.bannerTitle.textContent = `${prettyColor(state.nextColor)} AI to move`;
     els.bannerSub.textContent = "Use AI Move or enable Auto-play AI turns.";
@@ -522,15 +689,28 @@ function syncControls() {
   els.sizeValue.textContent = settings.hexSize;
   renderSearchStats(state.search || {});
 
-  const canHumanMove = gameStarted && !searchBusy && !state.gameOver && !state.botPending;
+  // Player can move if: game started, no move search running, game not over, not AI's turn
+  // Analysis running does NOT block the player
+  const canHumanMove = gameStarted && !moveBusy && !state.gameOver && !state.botPending;
   els.commitButton.disabled = !canHumanMove || selected.length !== 2;
-  els.clearSelectionButton.disabled = searchBusy || selected.length === 0;
-  els.botButton.disabled = !gameStarted || searchBusy || !state.botPending;
-  els.analyzeButton.disabled = !gameStarted || searchBusy || state.gameOver;
-  els.undoButton.disabled = searchBusy || !state.canUndo;
-  els.undoRoundButton.disabled = searchBusy || !state.canUndo;
-  els.redoButton.disabled = searchBusy || !state.canRedo;
-  els.newGameButton.disabled = searchBusy;
+  els.clearSelectionButton.disabled = moveBusy || selected.length === 0;
+  els.botButton.disabled = !gameStarted || moveBusy || !state.botPending;
+
+  // Show the manual Analyze button only when ponder is OFF (otherwise analysis is automatic)
+  // and hide it entirely for ai-ai mode where there are no human turns to analyze
+  const isPonderMode = state.ponder && state.mode === "human-human";
+  const isAiAi = state.mode === "ai-ai";
+  if (els.analyzeControls) {
+    els.analyzeControls.style.display = (isPonderMode || isAiAi) ? "none" : "";
+  }
+  if (els.analyzeButton) {
+    els.analyzeButton.disabled = !gameStarted || moveBusy || analysisBusy || state.gameOver;
+  }
+
+  els.undoButton.disabled = moveBusy || !state.canUndo;
+  els.undoRoundButton.disabled = moveBusy || !state.canUndo;
+  els.redoButton.disabled = moveBusy || !state.canRedo;
+  els.newGameButton.disabled = moveBusy;
 
   if (selected.length === 0) {
     els.selectedCells.innerHTML = '<span class="empty-selection">No cells selected</span>';
@@ -563,7 +743,8 @@ function syncControls() {
 }
 
 function selectCell(cell) {
-  if (!state || !gameStarted || searchBusy) {
+  if (!state || !gameStarted || moveBusy) {
+    // moveBusy (not analysisBusy) blocks selection
     return;
   }
   if (state.gameOver) {
@@ -602,7 +783,7 @@ function selectCell(cell) {
 }
 
 async function submitMove() {
-  if (selected.length !== 2 || searchBusy) {
+  if (selected.length !== 2 || moveBusy) {
     return;
   }
 
@@ -613,30 +794,69 @@ async function submitMove() {
 
   try {
     applyState(await postJson("/api/move", { cells }));
+    // Clear pv display on new move
+    pvMoves = [];
+    pvHoverIndex = -1;
   } catch (error) {
     showToast(error.message);
   }
 }
 
-async function startSearch(kind) {
-  if (searchBusy) {
+async function startMoveSearch() {
+  if (moveBusy) {
     return;
   }
   window.clearTimeout(searchPollTimer);
-  searchBusy = true;
+  moveBusy = true;
   syncControls();
 
   try {
-    const search = await postJson(kind === "move" ? "/api/bot/start" : "/api/analyze/start");
+    const search = await postJson("/api/bot/start");
     renderSearchStats(search);
-    await pollSearchUntilDone();
+    await pollMoveSearchUntilDone();
     applyState(await getJson("/api/state"));
+    pvMoves = [];
+    pvHoverIndex = -1;
   } catch (error) {
     showToast(error.message);
   } finally {
-    searchBusy = false;
+    moveBusy = false;
     syncControls();
   }
+}
+
+async function startAnalysisSearch() {
+  if (analysisBusy || moveBusy) {
+    return;
+  }
+  analysisBusy = true;
+  syncControls();
+
+  try {
+    const infinite = settings.infiniteAnalysis;
+    const search = await postJson("/api/analyze/start", { infinite });
+    renderSearchStats(search);
+    await pollAnalysisUntilDone();
+    // Refresh state to get latest search stats (but don't clear pv — analysis results persist)
+    const freshState = await getJson("/api/state");
+    applyState(freshState);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    analysisBusy = false;
+    syncControls();
+    // FIX: schedule automation AFTER analysis finishes so ponder auto-restarts
+    // on the new position without needing a manual button press
+    scheduleAutomation();
+  }
+}
+
+// Legacy shim used by scheduleAutomation
+async function startSearch(kind) {
+  if (kind === "move") {
+    return startMoveSearch();
+  }
+  return startAnalysisSearch();
 }
 
 function wait(ms) {
@@ -645,7 +865,7 @@ function wait(ms) {
   });
 }
 
-async function pollSearchUntilDone() {
+async function pollMoveSearchUntilDone() {
   while (true) {
     const search = await getJson("/api/search");
     renderSearchStats(search);
@@ -656,17 +876,35 @@ async function pollSearchUntilDone() {
   }
 }
 
+async function pollAnalysisUntilDone() {
+  while (true) {
+    const search = await getJson("/api/search");
+    renderSearchStats(search);
+    // Update pvMoves from live poll
+    if (search.pvMoves && search.pvMoves.length > 0) {
+      pvMoves = search.pvMoves;
+      draw();
+    }
+    if (!search.running && !search.threadRunning) {
+      return;
+    }
+    await wait(140);
+  }
+}
+
 function scheduleAutomation() {
   window.clearTimeout(automationTimer);
-  if (!gameStarted || searchBusy || !state || state.gameOver) {
+  if (!gameStarted || moveBusy || !state || state.gameOver) {
     return;
   }
   if (state.botPending && settings.autoAi) {
-    automationTimer = window.setTimeout(() => startSearch("move"), 180);
+    automationTimer = window.setTimeout(() => startMoveSearch(), 180);
     return;
   }
-  if (state.mode === "human-human" && state.ponder && !state.search?.running) {
-    automationTimer = window.setTimeout(() => startSearch("analysis"), 260);
+  // FIX: ponder check — human-human mode with ponder enabled triggers automatic analysis.
+  // analysisBusy guard prevents stacking multiple analysis requests.
+  if (shouldAutoPonder()) {
+    automationTimer = window.setTimeout(() => startAnalysisSearch(), 260);
   }
 }
 
@@ -674,11 +912,13 @@ async function startNewGame(event) {
   if (event) {
     event.preventDefault();
   }
-  if (searchBusy) {
+  if (moveBusy) {
     return;
   }
 
   selected = [];
+  pvMoves = [];
+  pvHoverIndex = -1;
   gameStarted = true;
   settings.autoAi = els.setupAutoAiToggle.checked;
   els.autoAiToggle.checked = settings.autoAi;
@@ -693,7 +933,7 @@ async function startNewGame(event) {
 }
 
 async function applyOptions() {
-  if (searchBusy) {
+  if (moveBusy) {
     return;
   }
   try {
@@ -704,11 +944,13 @@ async function applyOptions() {
 }
 
 async function undo(steps) {
-  if (searchBusy) {
+  if (moveBusy) {
     return;
   }
   try {
     selected = [];
+    pvMoves = [];
+    pvHoverIndex = -1;
     applyState(await postJson("/api/undo", { steps }));
   } catch (error) {
     showToast(error.message);
@@ -716,11 +958,13 @@ async function undo(steps) {
 }
 
 async function redo() {
-  if (searchBusy) {
+  if (moveBusy) {
     return;
   }
   try {
     selected = [];
+    pvMoves = [];
+    pvHoverIndex = -1;
     applyState(await postJson("/api/redo"));
   } catch (error) {
     showToast(error.message);
@@ -822,8 +1066,15 @@ els.newGameButton.addEventListener("click", () => {
   syncSetupFromState();
   els.setupOverlay.classList.remove("hidden");
 });
-els.botButton.addEventListener("click", () => startSearch("move"));
-els.analyzeButton.addEventListener("click", () => startSearch("analysis"));
+els.botButton.addEventListener("click", () => startMoveSearch());
+if (els.analyzeButton) {
+  els.analyzeButton.addEventListener("click", () => startAnalysisSearch());
+}
+if (els.infiniteAnalysisToggle) {
+  els.infiniteAnalysisToggle.addEventListener("change", () => {
+    settings.infiniteAnalysis = els.infiniteAnalysisToggle.checked;
+  });
+}
 els.commitButton.addEventListener("click", submitMove);
 els.clearSelectionButton.addEventListener("click", () => {
   selected = [];

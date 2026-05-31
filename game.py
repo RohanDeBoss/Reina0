@@ -45,6 +45,7 @@ class HexoGame:
             },
         }
         self.search_stats = self.empty_search_stats()
+        self.position_id = 0
         self.reset()
 
     def _clean_depth(self, depth):
@@ -69,8 +70,10 @@ class HexoGame:
             "depths": [],
             "nodes": 0,
             "pv": [],
+            "pvMoves": [],
             "candidates": [],
             "elapsedMs": 0,
+            "nps": 0,
             "moveApplied": False,
             "error": None,
         }
@@ -80,6 +83,7 @@ class HexoGame:
 
     def reset(self):
         self.cellsplaced = new_board()
+        self.position_id += 1
         self.ply = 0
         self.next_color = self.first_color
         self.history = []
@@ -209,6 +213,7 @@ class HexoGame:
             self.redo_stack.clear()
 
         self.evaluate_winner()
+        self.position_id += 1
         if not self.game_over:
             self.next_color = opposite_color(self.next_color)
         return move
@@ -324,6 +329,7 @@ class HexoGame:
         history = list(self.history)
         redo_stack = list(self.redo_stack)
         self.cellsplaced = new_board()
+        self.position_id += 1
         self.ply = 0
         self.next_color = self.first_color
         self.winner = None
@@ -382,45 +388,149 @@ class HexoGame:
             "placementRange": PLACEMENT_RANGE,
             "frontier": frontier,
             "search": dict(self.search_stats),
+            "positionId": self.position_id,
         }
+
+    def clone_for_analysis(self, callback):
+        clone = HexoGame(
+            mode=self.mode,
+            human_color=self.human_color,
+            first_color=self.first_color,
+            blue_depth=self.side_settings["blue"]["depth"],
+            orange_depth=self.side_settings["orange"]["depth"],
+            blue_time_ms=self.side_settings["blue"]["timeMs"],
+            orange_time_ms=self.side_settings["orange"]["timeMs"],
+            ponder=self.ponder,
+        )
+        clone.cellsplaced = {}
+        clone.ply = self.ply
+        clone.next_color = self.next_color
+        clone.history = list(self.history)
+        clone.redo_stack = list(self.redo_stack)
+        clone.winner = self.winner
+        clone.game_over = self.game_over
+        clone.position_id = self.position_id
+        clone.search_stats = clone.empty_search_stats()
+        clone.bot = Reina0("0", "0", self.next_color, clone.cellsplaced, clone.side_settings[self.next_color]["depth"], telemetry_callback=callback)
+        for key, placed_cell in self.cellsplaced.items():
+            cloned_cell = cell(placed_cell.x, placed_cell.y, placed_cell.color)
+            clone.cellsplaced[key] = cloned_cell
+            add_to_index(clone.bot, cloned_cell, key)
+        return clone
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "web"
 GAME = HexoGame()
 GAME_LOCK = threading.Lock()
-SEARCH_THREAD = None
+MOVE_THREAD = None
+ANALYSIS_THREAD = None
+ANALYSIS_LOCK = threading.Lock()
+ANALYSIS_STATS = GAME.empty_search_stats()
 
 
-def search_thread_running():
-    return SEARCH_THREAD is not None and SEARCH_THREAD.is_alive()
+def move_thread_running():
+    return MOVE_THREAD is not None and MOVE_THREAD.is_alive()
 
 
-def start_search_thread(kind):
-    global SEARCH_THREAD
-    if search_thread_running():
+def analysis_thread_running():
+    return ANALYSIS_THREAD is not None and ANALYSIS_THREAD.is_alive()
+
+
+def current_search_stats():
+    # Move search always takes priority
+    if move_thread_running():
+        return {**GAME.search_stats, "threadRunning": True}
+    with ANALYSIS_LOCK:
+        analysis = dict(ANALYSIS_STATS)
+    if analysis_thread_running() or analysis.get("depths"):
+        return {**analysis, "threadRunning": analysis_thread_running()}
+    return {**GAME.search_stats, "threadRunning": False}
+
+
+def set_analysis_stats(stats):
+    global ANALYSIS_STATS
+    with ANALYSIS_LOCK:
+        ANALYSIS_STATS = {**GAME.empty_search_stats(), **stats}
+
+
+def start_move_thread():
+    global MOVE_THREAD
+    if move_thread_running():
         return False
 
     side = GAME.next_color
     GAME.search_stats = {
         **GAME.empty_search_stats(),
         "running": True,
-        "kind": kind,
+        "kind": "move",
         "side": side,
+        "positionId": GAME.position_id,
     }
 
     def worker():
         try:
             with GAME_LOCK:
-                if kind == "move":
-                    GAME.bot_move()
-                else:
-                    GAME.analyze(side)
+                GAME.bot_move()
         except Exception as exc:
-            GAME.search_stats = {**GAME.empty_search_stats(), "running": False, "kind": kind, "side": side, "error": f"{type(exc).__name__}: {exc}"}
+            GAME.search_stats = {**GAME.empty_search_stats(), "running": False, "kind": "move", "side": side, "error": f"{type(exc).__name__}: {exc}"}
 
-    SEARCH_THREAD = threading.Thread(target=worker, daemon=True)
-    SEARCH_THREAD.start()
+    MOVE_THREAD = threading.Thread(target=worker, daemon=True)
+    MOVE_THREAD.start()
+    return True
+
+
+def start_analysis_thread(infinite=False):
+    global ANALYSIS_THREAD
+    if analysis_thread_running():
+        return False
+
+    with GAME_LOCK:
+        side = GAME.next_color
+        position_id = GAME.position_id
+        base_stats = {
+            **GAME.empty_search_stats(),
+            "running": True,
+            "kind": "analysis",
+            "side": side,
+            "positionId": position_id,
+            "infinite": bool(infinite),
+        }
+        set_analysis_stats(base_stats)
+
+        def callback(stats):
+            set_analysis_stats({
+                **base_stats,
+                **stats,
+                "kind": "analysis",
+                "side": side,
+                "positionId": position_id,
+                "infinite": bool(infinite),
+            })
+
+        analysis_game = GAME.clone_for_analysis(callback)
+
+    def worker():
+        try:
+            while True:
+                # Re-mark running=True at the start of each iteration so the JS
+                # polling loop does not terminate between analysis passes.
+                with ANALYSIS_LOCK:
+                    ANALYSIS_STATS["running"] = True
+                analysis_game.analyze(side)
+                with ANALYSIS_LOCK:
+                    latest = {**ANALYSIS_STATS, "running": False, "kind": "analysis", "side": side, "positionId": position_id, "infinite": bool(infinite)}
+                    ANALYSIS_STATS.update(latest)
+                if not infinite:
+                    break
+                with GAME_LOCK:
+                    if GAME.position_id != position_id or GAME.game_over:
+                        break
+        except Exception as exc:
+            set_analysis_stats({**GAME.empty_search_stats(), "running": False, "kind": "analysis", "side": side, "positionId": position_id, "error": f"{type(exc).__name__}: {exc}"})
+
+    ANALYSIS_THREAD = threading.Thread(target=worker, daemon=True)
+    ANALYSIS_THREAD.start()
     return True
 
 
@@ -449,10 +559,12 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/state":
             with GAME_LOCK:
-                self.send_json(GAME.to_dict())
+                data = GAME.to_dict()
+            data["search"] = current_search_stats()
+            self.send_json(data)
             return
         if parsed.path == "/api/search":
-            self.send_json({**GAME.search_stats, "threadRunning": search_thread_running()})
+            self.send_json(current_search_stats())
             return
 
         path = parsed.path if parsed.path != "/" else "/index.html"
@@ -466,6 +578,7 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             with GAME_LOCK:
                 if parsed.path == "/api/new":
+                    global ANALYSIS_STATS
                     GAME = HexoGame(
                         mode=payload.get("mode", "human-ai"),
                         human_color=payload.get("humanColor", "blue"),
@@ -476,20 +589,31 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
                         orange_time_ms=payload.get("orangeTimeMs", 0),
                         ponder=payload.get("ponder", False),
                     )
+                    ANALYSIS_STATS = GAME.empty_search_stats()
                     self.send_json(GAME.to_dict())
                     return
 
                 if parsed.path == "/api/move":
+                    # Allow moves even if analysis is running (not move search)
+                    if move_thread_running():
+                        self.send_json({"error": "AI move is in progress."}, status=400)
+                        return
                     GAME.player_move(payload.get("cells"))
                     self.send_json(GAME.to_dict())
                     return
 
                 if parsed.path == "/api/undo":
+                    if move_thread_running():
+                        self.send_json({"error": "AI move is in progress."}, status=400)
+                        return
                     GAME.undo(payload.get("steps", 1))
                     self.send_json(GAME.to_dict())
                     return
 
                 if parsed.path == "/api/redo":
+                    if move_thread_running():
+                        self.send_json({"error": "AI move is in progress."}, status=400)
+                        return
                     GAME.redo()
                     self.send_json(GAME.to_dict())
                     return
@@ -511,15 +635,15 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/bot/start":
                 if not GAME.to_dict()["botPending"]:
                     raise ValueError("It is not an AI turn.")
-                start_search_thread("move")
-                self.send_json({**GAME.search_stats, "threadRunning": search_thread_running()})
+                start_move_thread()
+                self.send_json(current_search_stats())
                 return
 
             if parsed.path == "/api/analyze/start":
                 if GAME.to_dict()["gameOver"]:
                     raise ValueError("The game is already over.")
-                start_search_thread("analysis")
-                self.send_json({**GAME.search_stats, "threadRunning": search_thread_running()})
+                start_analysis_thread(bool(payload.get("infinite", False)))
+                self.send_json(current_search_stats())
                 return
 
             self.send_json({"error": "Unknown endpoint."}, status=404)
