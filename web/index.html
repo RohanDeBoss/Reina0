@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HeXO Local Sandbox</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">H</div>
+        <div>
+          <div class="brand-name">HeXO</div>
+          <div class="brand-subtitle">Infinite Hex Tic-Tac-Toe</div>
+        </div>
+      </div>
+      <div class="turn-pill">
+        <span id="turnDot" class="dot blue"></span>
+        <span id="turnText">Loading</span>
+      </div>
+      <div class="top-actions">
+        <button id="undoButton" type="button">Undo</button>
+        <button id="redoButton" type="button">Redo</button>
+        <button id="botButton" type="button">Bot Move</button>
+        <button id="newGameButton" class="primary" type="button">Play</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="board-wrap" aria-label="HeXO board">
+        <canvas id="boardCanvas"></canvas>
+        <div class="board-banner" id="boardBanner">
+          <div id="bannerTitle">Blue to move</div>
+          <div id="bannerSub">Select two empty hexes.</div>
+        </div>
+        <div class="coord-readout" id="coordReadout">0, 0</div>
+        <div class="engine-widget" id="engineWidget">
+          <div class="engine-compact">
+            <span id="engineEval">Eval -</span>
+            <span id="engineDepth">D0</span>
+            <span id="engineStatus">Idle</span>
+          </div>
+          <div class="engine-details">
+            <div class="engine-row"><span>Time</span><strong id="engineTime">0 ms</strong></div>
+            <div class="engine-row"><span>Nodes</span><strong id="engineNodes">0</strong></div>
+            <div class="engine-row engine-pv"><span>PV</span><strong id="enginePv">-</strong></div>
+            <div id="engineDepths" class="engine-depths"></div>
+          </div>
+        </div>
+        <div class="toast" id="toast" hidden></div>
+      </section>
+
+      <aside class="side-panel">
+        <section class="panel">
+          <div class="eyebrow">Sandbox Mode</div>
+          <h1>Local Bot Match</h1>
+          <div class="quick-stats">
+            <div>
+              <span>Cells</span>
+              <strong id="cellsStat">0</strong>
+            </div>
+            <div>
+              <span>Turn</span>
+              <strong id="turnStat">1</strong>
+            </div>
+            <div>
+              <span>Score</span>
+              <strong id="scoreStat">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Move</h2>
+          <div class="selected-row" id="selectedCells">
+            <span class="empty-selection">No cells selected</span>
+          </div>
+          <div class="button-grid">
+            <button id="commitButton" class="primary" type="button">Place Cells</button>
+            <button id="clearSelectionButton" type="button">Clear</button>
+          </div>
+          <label class="check-row">
+            <input id="autoSubmitToggle" type="checkbox" checked>
+            <span>Place after two clicks</span>
+          </label>
+          <label class="check-row">
+            <input id="autoBotToggle" type="checkbox" checked>
+            <span>Auto bot reply</span>
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Play</h2>
+          <label class="field">
+            <span>You play</span>
+            <select id="humanColorSelect">
+              <option value="blue">Blue</option>
+              <option value="orange">Orange</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>First move</span>
+            <select id="firstColorSelect">
+              <option value="blue">Blue</option>
+              <option value="orange">Orange</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Mode</span>
+            <select id="modeSelect">
+              <option value="bot">Versus bot</option>
+              <option value="local">Local two-player</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Bot depth <b id="depthValue">3</b></span>
+            <input id="depthSlider" type="range" min="1" max="6" value="3">
+          </label>
+          <div class="button-grid">
+            <button id="playButton" class="primary" type="button">Play Game</button>
+            <button id="applyOptionsButton" type="button">Apply</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Board</h2>
+          <label class="field">
+            <span>Hex size <b id="sizeValue">34</b></span>
+            <input id="sizeSlider" type="range" min="20" max="52" value="34">
+          </label>
+          <div class="toggle-grid">
+            <label class="check-row">
+              <input id="coordsToggle" type="checkbox">
+              <span>Coordinates</span>
+            </label>
+            <label class="check-row">
+              <input id="hintsToggle" type="checkbox" checked>
+              <span>Move hints</span>
+            </label>
+            <label class="check-row">
+              <input id="heatToggle" type="checkbox">
+              <span>Threat tint</span>
+            </label>
+            <label class="check-row">
+              <input id="latestToggle" type="checkbox" checked>
+              <span>Latest move</span>
+            </label>
+          </div>
+          <div class="button-grid">
+            <button id="resetViewButton" type="button">Reset View</button>
+            <button id="centerPiecesButton" type="button">Center Pieces</button>
+          </div>
+        </section>
+
+        <section class="panel history-panel">
+          <div class="history-header">
+            <h2>History</h2>
+            <button id="undoRoundButton" type="button">Undo Round</button>
+          </div>
+          <div id="historyList" class="history-list"></div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
