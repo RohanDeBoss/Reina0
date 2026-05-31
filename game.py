@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 import mimetypes
 import threading
@@ -11,21 +11,61 @@ from mybot import COLORS, Reina0, add_to_index, cell, mark_dirty_multiple, new_b
 
 
 PLACEMENT_RANGE = 8
+MODES = ("human-ai", "human-human", "ai-ai")
+DEFAULT_SIDE_SETTINGS = {
+    "blue": {"depth": 3, "timeMs": 0},
+    "orange": {"depth": 3, "timeMs": 0},
+}
 
 
 class HexoGame:
-    def __init__(self, human_color="blue", first_color="blue", bot_depth=3, bot_enabled=True):
+    def __init__(
+        self,
+        mode="human-ai",
+        human_color="blue",
+        first_color="blue",
+        blue_depth=3,
+        orange_depth=3,
+        blue_time_ms=0,
+        orange_time_ms=0,
+        ponder=False,
+    ):
+        self.mode = mode if mode in MODES else "human-ai"
         self.human_color = human_color if human_color in COLORS else "blue"
-        self.bot_color = opposite_color(self.human_color)
         self.first_color = first_color if first_color in COLORS else "blue"
-        self.bot_depth = self._clean_depth(bot_depth)
-        self.bot_enabled = bool(bot_enabled)
+        self.ponder = bool(ponder)
+        self.side_settings = {
+            "blue": {
+                "depth": self._clean_depth(blue_depth),
+                "timeMs": self._clean_time_ms(blue_time_ms),
+            },
+            "orange": {
+                "depth": self._clean_depth(orange_depth),
+                "timeMs": self._clean_time_ms(orange_time_ms),
+            },
+        }
         self.search_stats = self.empty_search_stats()
         self.reset()
+
+    def _clean_depth(self, depth):
+        try:
+            depth = int(depth)
+        except (TypeError, ValueError):
+            depth = 3
+        return max(1, min(depth, 8))
+
+    def _clean_time_ms(self, value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = 0
+        return max(0, min(value, 300000))
 
     def empty_search_stats(self):
         return {
             "running": False,
+            "kind": "idle",
+            "side": None,
             "depths": [],
             "nodes": 0,
             "pv": [],
@@ -36,14 +76,7 @@ class HexoGame:
         }
 
     def update_search_stats(self, stats):
-        self.search_stats = {**self.empty_search_stats(), **stats}
-
-    def _clean_depth(self, depth):
-        try:
-            depth = int(depth)
-        except (TypeError, ValueError):
-            depth = 3
-        return max(1, min(depth, 8))
+        self.search_stats = {**self.empty_search_stats(), **self.search_stats, **stats}
 
     def reset(self):
         self.cellsplaced = new_board()
@@ -54,21 +87,46 @@ class HexoGame:
         self.winner = None
         self.game_over = False
         self.search_stats = self.empty_search_stats()
-        self.bot = Reina0("0", "0", self.bot_color, self.cellsplaced, self.bot_depth, telemetry_callback=self.update_search_stats)
+        self.bot = Reina0("0", "0", self.next_color, self.cellsplaced, self.side_settings[self.next_color]["depth"], telemetry_callback=self.update_search_stats)
         self.evaluate_winner()
 
-    def configure(self, human_color=None, first_color=None, bot_depth=None, bot_enabled=None):
+    def configure(
+        self,
+        mode=None,
+        human_color=None,
+        first_color=None,
+        blue_depth=None,
+        orange_depth=None,
+        blue_time_ms=None,
+        orange_time_ms=None,
+        ponder=None,
+    ):
+        if mode in MODES:
+            self.mode = mode
         if human_color in COLORS:
             self.human_color = human_color
-            self.bot_color = opposite_color(human_color)
         if first_color in COLORS:
             self.first_color = first_color
-        if bot_depth is not None:
-            self.bot_depth = self._clean_depth(bot_depth)
-        if bot_enabled is not None:
-            self.bot_enabled = bool(bot_enabled)
-        self.bot.color = self.bot_color
-        self.bot.movecheck = self.bot_depth
+        if blue_depth is not None:
+            self.side_settings["blue"]["depth"] = self._clean_depth(blue_depth)
+        if orange_depth is not None:
+            self.side_settings["orange"]["depth"] = self._clean_depth(orange_depth)
+        if blue_time_ms is not None:
+            self.side_settings["blue"]["timeMs"] = self._clean_time_ms(blue_time_ms)
+        if orange_time_ms is not None:
+            self.side_settings["orange"]["timeMs"] = self._clean_time_ms(orange_time_ms)
+        if ponder is not None:
+            self.ponder = bool(ponder)
+
+    def ai_sides(self):
+        if self.mode == "ai-ai":
+            return ["blue", "orange"]
+        if self.mode == "human-ai":
+            return [opposite_color(self.human_color)]
+        return []
+
+    def is_ai_turn(self):
+        return self.next_color in self.ai_sides() and not self.game_over
 
     def occupied_coords(self):
         return {(c.x, c.y) for c in self.cellsplaced.values()}
@@ -156,9 +214,11 @@ class HexoGame:
         return move
 
     def player_move(self, coords):
-        if self.bot_enabled and self.next_color != self.human_color:
-            raise ValueError("It is the bot's turn.")
-        actor = "you" if self.bot_enabled else "player"
+        if self.is_ai_turn():
+            raise ValueError("It is an AI turn.")
+        actor = self.next_color
+        if self.mode == "human-ai":
+            actor = "you"
         return self.place_pair(coords, self.next_color, actor=actor)
 
     def fallback_bot_move(self):
@@ -183,26 +243,43 @@ class HexoGame:
                                 return tuple(fallback)
         return None
 
-    def bot_move(self):
-        if not self.bot_enabled:
-            raise ValueError("Bot play is disabled.")
-        if self.next_color != self.bot_color:
-            raise ValueError("It is not the bot's turn.")
-        if self.game_over:
-            raise ValueError("The game is already over.")
-
-        self.bot.color = self.bot_color
-        self.bot.movecheck = self.bot_depth
+    def prepare_bot(self, side, kind):
+        settings = self.side_settings[side]
+        self.bot.color = side
+        self.bot.movecheck = settings["depth"]
         self.bot.turnNum = str(self.ply + 1)
         self.bot.cellNum = "1"
         self.bot.themove = None
-        self.search_stats = self.empty_search_stats()
-        self.bot.alphabetacalls(self.bot_depth)
+        self.search_stats = {
+            **self.empty_search_stats(),
+            "running": True,
+            "kind": kind,
+            "side": side,
+        }
+        return settings
 
-        move = self.bot.themove
+    def run_search(self, side=None, kind="analysis"):
+        side = side or self.next_color
+        settings = self.prepare_bot(side, kind)
+        self.bot.alphabetacalls(settings["depth"], settings["timeMs"])
+        self.search_stats = {
+            **self.search_stats,
+            "running": False,
+            "kind": kind,
+            "side": side,
+        }
+        return self.bot.themove
+
+    def bot_move(self):
+        if not self.is_ai_turn():
+            raise ValueError("It is not an AI turn.")
+        side = self.next_color
+        move = self.run_search(side, kind="move")
         try:
             pair = self._normalise_pair(move)
             if any(coord in self.occupied_coords() for coord in pair):
+                pair = self.fallback_bot_move()
+            if any(not self.is_coord_in_range(coord) for coord in pair):
                 pair = self.fallback_bot_move()
         except (TypeError, ValueError):
             pair = self.fallback_bot_move()
@@ -210,9 +287,14 @@ class HexoGame:
         if pair is None:
             self.game_over = True
             return None
-        move = self.place_pair(pair, self.bot_color, actor="bot")
+        move_record = self.place_pair(pair, side, actor=f"{side} ai")
         self.search_stats["moveApplied"] = True
-        return move
+        return move_record
+
+    def analyze(self, side=None):
+        if self.game_over:
+            raise ValueError("The game is already over.")
+        return self.run_search(side or self.next_color, kind="analysis")
 
     def evaluate_winner(self):
         self.winner = None
@@ -247,7 +329,7 @@ class HexoGame:
         self.winner = None
         self.game_over = False
         self.search_stats = self.empty_search_stats()
-        self.bot = Reina0("0", "0", self.bot_color, self.cellsplaced, self.bot_depth, telemetry_callback=self.update_search_stats)
+        self.bot = Reina0("0", "0", self.next_color, self.cellsplaced, self.side_settings[self.next_color]["depth"], telemetry_callback=self.update_search_stats)
         for move in history:
             self.place_pair(move["cells"], move["color"], actor=move["actor"], record=False)
         self.history = history
@@ -281,13 +363,14 @@ class HexoGame:
                 "minY": min(ys),
                 "maxY": max(ys),
             },
+            "mode": self.mode,
             "nextColor": self.next_color,
             "humanColor": self.human_color,
             "firstColor": self.first_color,
-            "botColor": self.bot_color,
-            "botDepth": self.bot_depth,
-            "botEnabled": self.bot_enabled,
-            "botPending": self.bot_enabled and self.next_color == self.bot_color and not self.game_over,
+            "aiSides": self.ai_sides(),
+            "sideSettings": self.side_settings,
+            "ponder": self.ponder,
+            "botPending": self.is_ai_turn(),
             "gameOver": self.game_over,
             "winner": self.winner,
             "history": list(self.history),
@@ -306,28 +389,38 @@ ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = ROOT / "web"
 GAME = HexoGame()
 GAME_LOCK = threading.Lock()
-BOT_THREAD = None
+SEARCH_THREAD = None
 
 
-def bot_thread_running():
-    return BOT_THREAD is not None and BOT_THREAD.is_alive()
+def search_thread_running():
+    return SEARCH_THREAD is not None and SEARCH_THREAD.is_alive()
 
 
-def start_bot_thread():
-    global BOT_THREAD
-    if bot_thread_running():
+def start_search_thread(kind):
+    global SEARCH_THREAD
+    if search_thread_running():
         return False
-    GAME.search_stats = {**GAME.empty_search_stats(), "running": True}
+
+    side = GAME.next_color
+    GAME.search_stats = {
+        **GAME.empty_search_stats(),
+        "running": True,
+        "kind": kind,
+        "side": side,
+    }
 
     def worker():
         try:
             with GAME_LOCK:
-                GAME.bot_move()
+                if kind == "move":
+                    GAME.bot_move()
+                else:
+                    GAME.analyze(side)
         except Exception as exc:
-            GAME.search_stats = {**GAME.empty_search_stats(), "running": False, "error": f"{type(exc).__name__}: {exc}"}
+            GAME.search_stats = {**GAME.empty_search_stats(), "running": False, "kind": kind, "side": side, "error": f"{type(exc).__name__}: {exc}"}
 
-    BOT_THREAD = threading.Thread(target=worker, daemon=True)
-    BOT_THREAD.start()
+    SEARCH_THREAD = threading.Thread(target=worker, daemon=True)
+    SEARCH_THREAD.start()
     return True
 
 
@@ -359,7 +452,7 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
                 self.send_json(GAME.to_dict())
             return
         if parsed.path == "/api/search":
-            self.send_json({**GAME.search_stats, "threadRunning": bot_thread_running()})
+            self.send_json({**GAME.search_stats, "threadRunning": search_thread_running()})
             return
 
         path = parsed.path if parsed.path != "/" else "/index.html"
@@ -374,33 +467,21 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
             with GAME_LOCK:
                 if parsed.path == "/api/new":
                     GAME = HexoGame(
+                        mode=payload.get("mode", "human-ai"),
                         human_color=payload.get("humanColor", "blue"),
                         first_color=payload.get("firstColor", "blue"),
-                        bot_depth=payload.get("botDepth", 3),
-                        bot_enabled=payload.get("botEnabled", True),
+                        blue_depth=payload.get("blueDepth", 3),
+                        orange_depth=payload.get("orangeDepth", 3),
+                        blue_time_ms=payload.get("blueTimeMs", 0),
+                        orange_time_ms=payload.get("orangeTimeMs", 0),
+                        ponder=payload.get("ponder", False),
                     )
-                    if payload.get("autoBot", True) and GAME.to_dict()["botPending"]:
-                        GAME.bot_move()
                     self.send_json(GAME.to_dict())
                     return
 
                 if parsed.path == "/api/move":
                     GAME.player_move(payload.get("cells"))
-                    if payload.get("autoBot", True) and GAME.to_dict()["botPending"]:
-                        GAME.bot_move()
                     self.send_json(GAME.to_dict())
-                    return
-
-                if parsed.path == "/api/bot":
-                    GAME.bot_move()
-                    self.send_json(GAME.to_dict())
-                    return
-
-                if parsed.path == "/api/bot/start":
-                    if not GAME.to_dict()["botPending"]:
-                        raise ValueError("It is not the bot's turn.")
-                    start_bot_thread()
-                    self.send_json({**GAME.search_stats, "threadRunning": bot_thread_running()})
                     return
 
                 if parsed.path == "/api/undo":
@@ -415,13 +496,31 @@ class HexoRequestHandler(SimpleHTTPRequestHandler):
 
                 if parsed.path == "/api/options":
                     GAME.configure(
+                        mode=payload.get("mode"),
                         human_color=payload.get("humanColor"),
                         first_color=payload.get("firstColor"),
-                        bot_depth=payload.get("botDepth"),
-                        bot_enabled=payload.get("botEnabled"),
+                        blue_depth=payload.get("blueDepth"),
+                        orange_depth=payload.get("orangeDepth"),
+                        blue_time_ms=payload.get("blueTimeMs"),
+                        orange_time_ms=payload.get("orangeTimeMs"),
+                        ponder=payload.get("ponder"),
                     )
                     self.send_json(GAME.to_dict())
                     return
+
+            if parsed.path == "/api/bot/start":
+                if not GAME.to_dict()["botPending"]:
+                    raise ValueError("It is not an AI turn.")
+                start_search_thread("move")
+                self.send_json({**GAME.search_stats, "threadRunning": search_thread_running()})
+                return
+
+            if parsed.path == "/api/analyze/start":
+                if GAME.to_dict()["gameOver"]:
+                    raise ValueError("The game is already over.")
+                start_search_thread("analysis")
+                self.send_json({**GAME.search_stats, "threadRunning": search_thread_running()})
+                return
 
             self.send_json({"error": "Unknown endpoint."}, status=404)
         except ValueError as exc:
@@ -484,4 +583,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

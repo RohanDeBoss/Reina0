@@ -3,10 +3,82 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>HeXO Local Sandbox</title>
+    <title>HeXO Local</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <div id="setupOverlay" class="setup-overlay">
+      <form id="setupForm" class="setup-dialog">
+        <div class="eyebrow">New Game</div>
+        <h1>HeXO</h1>
+
+        <label class="field">
+          <span>Mode</span>
+          <select id="setupMode">
+            <option value="human-ai">Human vs AI</option>
+            <option value="human-human">Human vs Human</option>
+            <option value="ai-ai">AI vs AI</option>
+          </select>
+        </label>
+
+        <div id="humanSideField" class="field-row">
+          <label class="field">
+            <span>Human side</span>
+            <select id="setupHumanColor">
+              <option value="blue">Blue</option>
+              <option value="orange">Orange</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>First move</span>
+            <select id="setupFirstColor">
+              <option value="blue">Blue</option>
+              <option value="orange">Orange</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="engine-setup-grid">
+          <section>
+            <h2>Blue Engine</h2>
+            <label class="field">
+              <span>Depth <b id="blueDepthValue">3</b></span>
+              <input id="blueDepthInput" type="range" min="1" max="8" value="3">
+            </label>
+            <label class="field">
+              <span>Time limit seconds</span>
+              <input id="blueTimeInput" type="number" min="0" max="300" step="1" value="0">
+            </label>
+          </section>
+          <section>
+            <h2>Orange Engine</h2>
+            <label class="field">
+              <span>Depth <b id="orangeDepthValue">3</b></span>
+              <input id="orangeDepthInput" type="range" min="1" max="8" value="3">
+            </label>
+            <label class="field">
+              <span>Time limit seconds</span>
+              <input id="orangeTimeInput" type="number" min="0" max="300" step="1" value="0">
+            </label>
+          </section>
+        </div>
+
+        <label id="ponderRow" class="check-row setup-check">
+          <input id="setupPonderToggle" type="checkbox">
+          <span>Ponder analysis in Human vs Human</span>
+        </label>
+
+        <label class="check-row setup-check">
+          <input id="setupAutoAiToggle" type="checkbox" checked>
+          <span>Auto-play AI turns</span>
+        </label>
+
+        <div class="setup-actions">
+          <button id="startGameButton" class="primary" type="submit">Play</button>
+        </div>
+      </form>
+    </div>
+
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">H</div>
@@ -22,8 +94,9 @@
       <div class="top-actions">
         <button id="undoButton" type="button">Undo</button>
         <button id="redoButton" type="button">Redo</button>
-        <button id="botButton" type="button">Bot Move</button>
-        <button id="newGameButton" class="primary" type="button">Play</button>
+        <button id="analyzeButton" type="button">Analyze</button>
+        <button id="botButton" type="button">AI Move</button>
+        <button id="newGameButton" class="primary" type="button">New Game</button>
       </div>
     </header>
 
@@ -31,44 +104,40 @@
       <section class="board-wrap" aria-label="HeXO board">
         <canvas id="boardCanvas"></canvas>
         <div class="board-banner" id="boardBanner">
-          <div id="bannerTitle">Blue to move</div>
-          <div id="bannerSub">Select two empty hexes.</div>
+          <div id="bannerTitle">Ready</div>
+          <div id="bannerSub">Open New Game to choose a mode.</div>
         </div>
         <div class="coord-readout" id="coordReadout">0, 0</div>
-        <div class="engine-widget" id="engineWidget">
-          <div class="engine-compact">
-            <span id="engineEval">Eval -</span>
-            <span id="engineDepth">D0</span>
-            <span id="engineStatus">Idle</span>
-          </div>
-          <div class="engine-details">
-            <div class="engine-row"><span>Time</span><strong id="engineTime">0 ms</strong></div>
-            <div class="engine-row"><span>Nodes</span><strong id="engineNodes">0</strong></div>
-            <div class="engine-row engine-pv"><span>PV</span><strong id="enginePv">-</strong></div>
-            <div id="engineDepths" class="engine-depths"></div>
-          </div>
-        </div>
         <div class="toast" id="toast" hidden></div>
       </section>
 
       <aside class="side-panel">
-        <section class="panel">
-          <div class="eyebrow">Sandbox Mode</div>
-          <h1>Local Bot Match</h1>
+        <section class="panel status-panel">
+          <div class="eyebrow" id="modeLabel">Setup</div>
+          <h1 id="statusTitle">No Game Started</h1>
           <div class="quick-stats">
-            <div>
-              <span>Cells</span>
-              <strong id="cellsStat">0</strong>
-            </div>
-            <div>
-              <span>Turn</span>
-              <strong id="turnStat">1</strong>
-            </div>
-            <div>
-              <span>Score</span>
-              <strong id="scoreStat">-</strong>
-            </div>
+            <div><span>Cells</span><strong id="cellsStat">0</strong></div>
+            <div><span>Turn</span><strong id="turnStat">1</strong></div>
+            <div><span>Eval</span><strong id="scoreStat">-</strong></div>
           </div>
+        </section>
+
+        <section class="panel engine-panel">
+          <div class="history-header">
+            <h2>Engine</h2>
+            <span id="engineStatus" class="engine-badge">Idle</span>
+          </div>
+          <div class="engine-summary">
+            <div><span>Side</span><strong id="engineSide">-</strong></div>
+            <div><span>Depth</span><strong id="engineDepth">D0</strong></div>
+            <div><span>Time</span><strong id="engineTime">0 ms</strong></div>
+            <div><span>Nodes</span><strong id="engineNodes">0</strong></div>
+          </div>
+          <div class="pv-box">
+            <span>PV</span>
+            <strong id="enginePv">-</strong>
+          </div>
+          <div id="engineDepths" class="engine-depths"></div>
         </section>
 
         <section class="panel">
@@ -85,42 +154,9 @@
             <span>Place after two clicks</span>
           </label>
           <label class="check-row">
-            <input id="autoBotToggle" type="checkbox" checked>
-            <span>Auto bot reply</span>
+            <input id="autoAiToggle" type="checkbox" checked>
+            <span>Auto-play AI turns</span>
           </label>
-        </section>
-
-        <section class="panel">
-          <h2>Play</h2>
-          <label class="field">
-            <span>You play</span>
-            <select id="humanColorSelect">
-              <option value="blue">Blue</option>
-              <option value="orange">Orange</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>First move</span>
-            <select id="firstColorSelect">
-              <option value="blue">Blue</option>
-              <option value="orange">Orange</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Mode</span>
-            <select id="modeSelect">
-              <option value="bot">Versus bot</option>
-              <option value="local">Local two-player</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Bot depth <b id="depthValue">3</b></span>
-            <input id="depthSlider" type="range" min="1" max="6" value="3">
-          </label>
-          <div class="button-grid">
-            <button id="playButton" class="primary" type="button">Play Game</button>
-            <button id="applyOptionsButton" type="button">Apply</button>
-          </div>
         </section>
 
         <section class="panel">
@@ -135,8 +171,8 @@
               <span>Coordinates</span>
             </label>
             <label class="check-row">
-              <input id="hintsToggle" type="checkbox" checked>
-              <span>Move hints</span>
+              <input id="frontierToggle" type="checkbox" checked>
+              <span>Legal frontier</span>
             </label>
             <label class="check-row">
               <input id="heatToggle" type="checkbox">

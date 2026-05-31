@@ -799,8 +799,12 @@ class Reina0():
             self.telemetry_callback(dict(self.search_stats))
 
     # Calling Alphabetaupdated()
-    def alphabetacalls(self, depth):
+    def alphabetacalls(self, depth, time_limit_ms=0):
         started = time.perf_counter()
+        try:
+            time_limit_ms = int(time_limit_ms or 0)
+        except (TypeError, ValueError):
+            time_limit_ms = 0
         self.search_stats = {
             "running": True,
             "depths": [],
@@ -808,6 +812,7 @@ class Reina0():
             "pv": [],
             "candidates": [],
             "elapsedMs": 0,
+            "timeLimitMs": time_limit_ms,
         }
         self.emit_telemetry()
         self.current_hash = 0
@@ -830,6 +835,8 @@ class Reina0():
                 "pv": list(self.search_stats.get("pv", [])),
             })
             self.emit_telemetry()
+            if time_limit_ms and self.search_stats["elapsedMs"] >= time_limit_ms:
+                break
         self.search_stats["running"] = False
         self.search_stats["elapsedMs"] = int((time.perf_counter() - started) * 1000)
         self.emit_telemetry()

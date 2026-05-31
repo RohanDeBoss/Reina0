@@ -3,19 +3,36 @@ const ctx = canvas.getContext("2d");
 const SQRT3 = Math.sqrt(3);
 
 const els = {
+  setupOverlay: document.getElementById("setupOverlay"),
+  setupForm: document.getElementById("setupForm"),
+  setupMode: document.getElementById("setupMode"),
+  setupHumanColor: document.getElementById("setupHumanColor"),
+  setupFirstColor: document.getElementById("setupFirstColor"),
+  humanSideField: document.getElementById("humanSideField"),
+  ponderRow: document.getElementById("ponderRow"),
+  setupPonderToggle: document.getElementById("setupPonderToggle"),
+  setupAutoAiToggle: document.getElementById("setupAutoAiToggle"),
+  blueDepthInput: document.getElementById("blueDepthInput"),
+  orangeDepthInput: document.getElementById("orangeDepthInput"),
+  blueDepthValue: document.getElementById("blueDepthValue"),
+  orangeDepthValue: document.getElementById("orangeDepthValue"),
+  blueTimeInput: document.getElementById("blueTimeInput"),
+  orangeTimeInput: document.getElementById("orangeTimeInput"),
   turnDot: document.getElementById("turnDot"),
   turnText: document.getElementById("turnText"),
   bannerTitle: document.getElementById("bannerTitle"),
   bannerSub: document.getElementById("bannerSub"),
+  modeLabel: document.getElementById("modeLabel"),
+  statusTitle: document.getElementById("statusTitle"),
   cellsStat: document.getElementById("cellsStat"),
   turnStat: document.getElementById("turnStat"),
   scoreStat: document.getElementById("scoreStat"),
   selectedCells: document.getElementById("selectedCells"),
   coordReadout: document.getElementById("coordReadout"),
   toast: document.getElementById("toast"),
-  engineEval: document.getElementById("engineEval"),
-  engineDepth: document.getElementById("engineDepth"),
   engineStatus: document.getElementById("engineStatus"),
+  engineSide: document.getElementById("engineSide"),
+  engineDepth: document.getElementById("engineDepth"),
   engineTime: document.getElementById("engineTime"),
   engineNodes: document.getElementById("engineNodes"),
   enginePv: document.getElementById("enginePv"),
@@ -24,24 +41,18 @@ const els = {
   redoButton: document.getElementById("redoButton"),
   undoRoundButton: document.getElementById("undoRoundButton"),
   botButton: document.getElementById("botButton"),
+  analyzeButton: document.getElementById("analyzeButton"),
   newGameButton: document.getElementById("newGameButton"),
-  playButton: document.getElementById("playButton"),
   commitButton: document.getElementById("commitButton"),
   clearSelectionButton: document.getElementById("clearSelectionButton"),
-  applyOptionsButton: document.getElementById("applyOptionsButton"),
-  humanColorSelect: document.getElementById("humanColorSelect"),
-  firstColorSelect: document.getElementById("firstColorSelect"),
-  modeSelect: document.getElementById("modeSelect"),
-  depthSlider: document.getElementById("depthSlider"),
-  depthValue: document.getElementById("depthValue"),
+  autoSubmitToggle: document.getElementById("autoSubmitToggle"),
+  autoAiToggle: document.getElementById("autoAiToggle"),
   sizeSlider: document.getElementById("sizeSlider"),
   sizeValue: document.getElementById("sizeValue"),
   coordsToggle: document.getElementById("coordsToggle"),
-  hintsToggle: document.getElementById("hintsToggle"),
+  frontierToggle: document.getElementById("frontierToggle"),
   heatToggle: document.getElementById("heatToggle"),
   latestToggle: document.getElementById("latestToggle"),
-  autoSubmitToggle: document.getElementById("autoSubmitToggle"),
-  autoBotToggle: document.getElementById("autoBotToggle"),
   resetViewButton: document.getElementById("resetViewButton"),
   centerPiecesButton: document.getElementById("centerPiecesButton"),
   historyList: document.getElementById("historyList")
@@ -51,18 +62,20 @@ let state = null;
 let cellMap = new Map();
 let selected = [];
 let hoverCell = null;
-let busy = false;
+let searchBusy = false;
+let gameStarted = false;
 let toastTimer = null;
 let searchPollTimer = null;
+let automationTimer = null;
 
 const settings = {
   hexSize: 34,
   showCoords: false,
-  showHints: true,
+  showFrontier: true,
   showHeat: false,
   showLatest: true,
   autoSubmit: true,
-  autoBot: true
+  autoAi: true
 };
 
 const view = {
@@ -82,6 +95,14 @@ function coordKey(x, y) {
 
 function prettyColor(color) {
   return color ? color.charAt(0).toUpperCase() + color.slice(1) : "-";
+}
+
+function modeLabel(mode) {
+  return {
+    "human-ai": "Human vs AI",
+    "human-human": "Human vs Human",
+    "ai-ai": "AI vs AI"
+  }[mode] || "Setup";
 }
 
 function activeSize() {
@@ -126,7 +147,6 @@ function roundAxial(q, r) {
   let rx = Math.round(x);
   let ry = Math.round(y);
   let rz = Math.round(z);
-
   const xDiff = Math.abs(rx - x);
   const yDiff = Math.abs(ry - y);
   const zDiff = Math.abs(rz - z);
@@ -151,34 +171,6 @@ function isLatest(cell) {
   }
   const latest = state.history[state.history.length - 1];
   return latest.cells.some((item) => item.x === cell.x && item.y === cell.y);
-}
-
-function buildHintSet() {
-  const hints = new Set();
-  if (!state || !settings.showHints) {
-    return hints;
-  }
-
-  const occupied = new Set(state.cells.map((cell) => coordKey(cell.x, cell.y)));
-  const frontier = new Set((state.frontier || []).map((cell) => coordKey(cell.x, cell.y)));
-  const focus = state.cells.slice(-16);
-  for (const cell of state.cells) {
-    if ((cell.threatcount > 0 || cell.line >= 3) && !focus.includes(cell)) {
-      focus.push(cell);
-    }
-  }
-
-  for (const cell of focus) {
-    for (let x = cell.x - 2; x <= cell.x + 2; x += 1) {
-      for (let y = cell.y - 2; y <= cell.y + 2; y += 1) {
-        const key = coordKey(x, y);
-        if (!occupied.has(key) && frontier.has(key)) {
-          hints.add(key);
-        }
-      }
-    }
-  }
-  return hints;
 }
 
 function hexPath(cx, cy, radius) {
@@ -218,9 +210,8 @@ function drawHex(cell, options = {}) {
     ctx.strokeStyle = options.stroke;
     ctx.stroke();
   }
-
   if (options.label) {
-    ctx.fillStyle = options.labelColor || "rgba(214, 225, 237, 0.62)";
+    ctx.fillStyle = "rgba(214, 225, 237, 0.58)";
     ctx.font = `${Math.max(10, Math.floor(activeSize() * 0.32))}px Cascadia Mono, Consolas, monospace`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -241,17 +232,12 @@ function drawPiece(cell) {
   }
 
   const blue = cell.color === "blue";
-  const edge = blue ? "#d9f5ff" : "#fff2bf";
-  const base = blue ? "#47c8ff" : "#ffc23d";
-
-  ctx.save();
   hexPath(center.x, center.y, radius);
-  ctx.fillStyle = base;
+  ctx.fillStyle = blue ? "#47c8ff" : "#ffc23d";
   ctx.fill();
   ctx.lineWidth = Math.max(2, activeSize() * 0.08);
-  ctx.strokeStyle = edge;
+  ctx.strokeStyle = blue ? "#d9f5ff" : "#fff2bf";
   ctx.stroke();
-  ctx.restore();
 
   if (settings.showHeat && (cell.threatcount > 0 || cell.line >= 4)) {
     hexPath(center.x, center.y, radius + 4);
@@ -285,28 +271,23 @@ function draw() {
     return;
   }
 
-  const hints = buildHintSet();
-  for (const cell of state.frontier || []) {
-    const key = coordKey(cell.x, cell.y);
-    const selectedHere = isSelected(cell);
-    const hoverHere = hoverCell && hoverCell.x === cell.x && hoverCell.y === cell.y;
-    const hintHere = hints.has(key);
-    drawHex(cell, {
-      fill: selectedHere
-        ? "rgba(98, 240, 189, 0.18)"
-        : hoverHere
-          ? "rgba(255, 255, 255, 0.05)"
-          : hintHere
-            ? "rgba(98, 240, 189, 0.055)"
+  if (settings.showFrontier) {
+    for (const cell of state.frontier || []) {
+      const selectedHere = isSelected(cell);
+      const hoverHere = hoverCell && hoverCell.x === cell.x && hoverCell.y === cell.y;
+      drawHex(cell, {
+        fill: selectedHere
+          ? "rgba(98, 240, 189, 0.16)"
+          : hoverHere
+            ? "rgba(255, 255, 255, 0.06)"
             : "rgba(16, 24, 38, 0.54)",
-      stroke: selectedHere
-        ? "rgba(98, 240, 189, 0.95)"
-        : hintHere
-          ? "rgba(98, 240, 189, 0.28)"
+        stroke: selectedHere
+          ? "rgba(98, 240, 189, 0.95)"
           : "rgba(132, 153, 184, 0.18)",
-      lineWidth: selectedHere ? 2.5 : 1,
-      label: settings.showCoords && activeSize() >= 30 ? `${cell.x},${cell.y}` : null
-    });
+        lineWidth: selectedHere ? 2.5 : 1,
+        label: settings.showCoords && activeSize() >= 30 ? `${cell.x},${cell.y}` : null
+      });
+    }
   }
 
   for (const cell of state.cells) {
@@ -373,12 +354,43 @@ async function postJson(url, payload = {}) {
   return data;
 }
 
+function secondsToMs(value) {
+  const seconds = Number(value || 0);
+  return Math.max(0, Math.floor(seconds * 1000));
+}
+
+function msToSeconds(ms) {
+  return Math.floor(Number(ms || 0) / 1000);
+}
+
+function setupPayload() {
+  return {
+    mode: els.setupMode.value,
+    humanColor: els.setupHumanColor.value,
+    firstColor: els.setupFirstColor.value,
+    blueDepth: Number(els.blueDepthInput.value),
+    orangeDepth: Number(els.orangeDepthInput.value),
+    blueTimeMs: secondsToMs(els.blueTimeInput.value),
+    orangeTimeMs: secondsToMs(els.orangeTimeInput.value),
+    ponder: els.setupPonderToggle.checked
+  };
+}
+
+function syncSetupFields() {
+  const mode = els.setupMode.value;
+  els.humanSideField.style.display = mode === "ai-ai" ? "none" : "grid";
+  els.setupHumanColor.disabled = mode !== "human-ai";
+  els.setupPonderToggle.disabled = mode !== "human-human";
+  els.ponderRow.style.opacity = mode === "human-human" ? "1" : "0.45";
+}
+
 function applyState(nextState) {
   state = nextState;
   cellMap = new Map(state.cells.map((cell) => [coordKey(cell.x, cell.y), cell]));
   selected = selected.filter((cell) => !cellMap.has(coordKey(cell.x, cell.y)));
   syncControls();
   draw();
+  scheduleAutomation();
 }
 
 async function loadState() {
@@ -390,21 +402,13 @@ async function loadState() {
   }
 }
 
-function setBusy(nextBusy, message) {
-  busy = nextBusy;
-  if (message) {
-    els.bannerSub.textContent = message;
-  }
-  syncControls();
-}
-
 function showToast(message) {
   window.clearTimeout(toastTimer);
   els.toast.textContent = message;
   els.toast.hidden = false;
   toastTimer = window.setTimeout(() => {
     els.toast.hidden = true;
-  }, 2400);
+  }, 2600);
 }
 
 function formatScore(score) {
@@ -430,15 +434,16 @@ function formatMs(ms) {
 function renderSearchStats(search = {}) {
   const depths = search.depths || [];
   const latestDepth = depths.length ? depths[depths.length - 1] : null;
-  const score = latestDepth ? latestDepth.score : state && state.lastScore;
   const pv = (search.pv && search.pv.length ? search.pv : latestDepth && latestDepth.pv) || [];
+  const running = search.running || search.threadRunning;
 
-  els.engineEval.textContent = `Eval ${formatScore(score)}`;
+  els.engineStatus.textContent = running ? (search.kind === "analysis" ? "Analyzing" : "Thinking") : "Idle";
+  els.engineSide.textContent = prettyColor(search.side);
   els.engineDepth.textContent = latestDepth ? `D${latestDepth.depth}` : "D0";
-  els.engineStatus.textContent = search.running || search.threadRunning ? "Thinking" : "Idle";
   els.engineTime.textContent = formatMs(search.elapsedMs);
   els.engineNodes.textContent = Number(search.nodes || 0).toLocaleString();
   els.enginePv.textContent = pv.length ? pv.join("  ") : "-";
+  els.scoreStat.textContent = formatScore(latestDepth ? latestDepth.score : state && state.lastScore);
 
   if (depths.length === 0) {
     els.engineDepths.innerHTML = '<div class="engine-empty">No search yet.</div>';
@@ -448,7 +453,7 @@ function renderSearchStats(search = {}) {
   els.engineDepths.innerHTML = depths
     .slice()
     .reverse()
-    .slice(0, 8)
+    .slice(0, 10)
     .map((item) => `
       <div class="engine-depth-row">
         <span>D${item.depth}</span>
@@ -458,6 +463,23 @@ function renderSearchStats(search = {}) {
       </div>
     `)
     .join("");
+}
+
+function syncSetupFromState() {
+  if (!state) {
+    return;
+  }
+  els.setupMode.value = state.mode || "human-ai";
+  els.setupHumanColor.value = state.humanColor || "blue";
+  els.setupFirstColor.value = state.firstColor || "blue";
+  els.blueDepthInput.value = state.sideSettings?.blue?.depth || 3;
+  els.orangeDepthInput.value = state.sideSettings?.orange?.depth || 3;
+  els.blueDepthValue.textContent = els.blueDepthInput.value;
+  els.orangeDepthValue.textContent = els.orangeDepthInput.value;
+  els.blueTimeInput.value = msToSeconds(state.sideSettings?.blue?.timeMs || 0);
+  els.orangeTimeInput.value = msToSeconds(state.sideSettings?.orange?.timeMs || 0);
+  els.setupPonderToggle.checked = Boolean(state.ponder);
+  syncSetupFields();
 }
 
 function syncControls() {
@@ -471,14 +493,25 @@ function syncControls() {
     ? `${prettyColor(state.winner)} wins`
     : `${prettyColor(state.nextColor)} to move`;
 
-  if (state.gameOver) {
+  els.modeLabel.textContent = modeLabel(state.mode);
+  els.statusTitle.textContent = state.gameOver
+    ? `${prettyColor(state.winner)} wins`
+    : state.botPending
+      ? `${prettyColor(state.nextColor)} AI to move`
+      : `${prettyColor(state.nextColor)} to move`;
+
+  if (!gameStarted) {
+    els.bannerTitle.textContent = "Setup";
+    els.bannerSub.textContent = "Choose a mode and press Play.";
+  } else if (state.gameOver) {
     els.bannerTitle.textContent = `${prettyColor(state.winner)} wins`;
-    els.bannerSub.textContent = "Start a new game or undo the last move.";
-  } else if (busy) {
-    els.bannerTitle.textContent = "Working";
+    els.bannerSub.textContent = "Start a new game or undo.";
+  } else if (searchBusy) {
+    els.bannerTitle.textContent = state.search?.kind === "analysis" ? "Analysis running" : "AI thinking";
+    els.bannerSub.textContent = "Engine output is updating in the side panel.";
   } else if (state.botPending) {
-    els.bannerTitle.textContent = "Bot to move";
-    els.bannerSub.textContent = "Use Bot Move, or enable Auto bot reply.";
+    els.bannerTitle.textContent = `${prettyColor(state.nextColor)} AI to move`;
+    els.bannerSub.textContent = "Use AI Move or enable Auto-play AI turns.";
   } else {
     els.bannerTitle.textContent = `${prettyColor(state.nextColor)} to move`;
     els.bannerSub.textContent = `${2 - selected.length} placements left this turn.`;
@@ -486,25 +519,18 @@ function syncControls() {
 
   els.cellsStat.textContent = state.occupied;
   els.turnStat.textContent = state.turn;
-  els.scoreStat.textContent = formatScore(state.lastScore);
-
-  els.humanColorSelect.value = state.humanColor;
-  els.firstColorSelect.value = state.firstColor;
-  els.modeSelect.value = state.botEnabled ? "bot" : "local";
-  els.depthSlider.value = state.botDepth;
-  els.depthValue.textContent = state.botDepth;
   els.sizeValue.textContent = settings.hexSize;
-  renderSearchStats(state.search);
+  renderSearchStats(state.search || {});
 
-  els.commitButton.disabled = busy || state.gameOver || selected.length !== 2 || state.botPending;
-  els.clearSelectionButton.disabled = busy || selected.length === 0;
-  els.botButton.disabled = busy || !state.botPending;
-  els.undoButton.disabled = busy || !state.canUndo;
-  els.undoRoundButton.disabled = busy || !state.canUndo;
-  els.redoButton.disabled = busy || !state.canRedo;
-  els.newGameButton.disabled = busy;
-  els.playButton.disabled = busy;
-  els.applyOptionsButton.disabled = busy;
+  const canHumanMove = gameStarted && !searchBusy && !state.gameOver && !state.botPending;
+  els.commitButton.disabled = !canHumanMove || selected.length !== 2;
+  els.clearSelectionButton.disabled = searchBusy || selected.length === 0;
+  els.botButton.disabled = !gameStarted || searchBusy || !state.botPending;
+  els.analyzeButton.disabled = !gameStarted || searchBusy || state.gameOver;
+  els.undoButton.disabled = searchBusy || !state.canUndo;
+  els.undoRoundButton.disabled = searchBusy || !state.canUndo;
+  els.redoButton.disabled = searchBusy || !state.canRedo;
+  els.newGameButton.disabled = searchBusy;
 
   if (selected.length === 0) {
     els.selectedCells.innerHTML = '<span class="empty-selection">No cells selected</span>';
@@ -520,7 +546,7 @@ function syncControls() {
     els.historyList.innerHTML = state.history
       .slice()
       .reverse()
-      .slice(0, 12)
+      .slice(0, 14)
       .map((move) => {
         const title = `${move.ply}. ${move.actor} placed ${prettyColor(move.color)}`;
         const coords = move.cells.map((cell) => `(${cell.x}, ${cell.y})`).join("  ");
@@ -537,7 +563,7 @@ function syncControls() {
 }
 
 function selectCell(cell) {
-  if (!state || busy) {
+  if (!state || !gameStarted || searchBusy) {
     return;
   }
   if (state.gameOver) {
@@ -545,7 +571,7 @@ function selectCell(cell) {
     return;
   }
   if (state.botPending) {
-    showToast("It is the bot's turn.");
+    showToast("It is an AI turn.");
     return;
   }
   if (cellMap.has(coordKey(cell.x, cell.y))) {
@@ -554,7 +580,7 @@ function selectCell(cell) {
   }
   const frontier = new Set((state.frontier || []).map((item) => coordKey(item.x, item.y)));
   if (!frontier.has(coordKey(cell.x, cell.y))) {
-    showToast(`Place within ${state.placementRange || 8} hexes of the position at turn start.`);
+    showToast(`Place within ${state.placementRange || 8} hexes of the current position.`);
     return;
   }
 
@@ -576,54 +602,40 @@ function selectCell(cell) {
 }
 
 async function submitMove() {
-  if (selected.length !== 2 || busy) {
+  if (selected.length !== 2 || searchBusy) {
     return;
   }
 
   const cells = selected.map((cell) => ({ x: cell.x, y: cell.y }));
+  selected = [];
+  syncControls();
+  draw();
+
   try {
-    selected = [];
-    syncControls();
-    draw();
-
-    setBusy(true, "Placing cells.");
-    let nextState = await postJson("/api/move", {
-      cells,
-      autoBot: false
-    });
-    applyState(nextState);
-
-    if (settings.autoBot && nextState.botPending) {
-      await startBotSearch();
-    }
+    applyState(await postJson("/api/move", { cells }));
   } catch (error) {
     showToast(error.message);
-  } finally {
-    setBusy(false);
-    syncControls();
-    draw();
   }
 }
 
-async function runBotMove() {
-  if (busy) {
+async function startSearch(kind) {
+  if (searchBusy) {
     return;
   }
-  await startBotSearch();
-}
-
-async function startBotSearch() {
   window.clearTimeout(searchPollTimer);
+  searchBusy = true;
+  syncControls();
+
   try {
-    setBusy(true, "Bot thinking.");
-    const search = await postJson("/api/bot/start");
+    const search = await postJson(kind === "move" ? "/api/bot/start" : "/api/analyze/start");
     renderSearchStats(search);
     await pollSearchUntilDone();
     applyState(await getJson("/api/state"));
   } catch (error) {
     showToast(error.message);
   } finally {
-    setBusy(false);
+    searchBusy = false;
+    syncControls();
   }
 }
 
@@ -640,80 +652,78 @@ async function pollSearchUntilDone() {
     if (!search.running && !search.threadRunning) {
       return;
     }
-    await wait(180);
+    await wait(140);
   }
 }
 
-async function newGame() {
-  if (busy) {
+function scheduleAutomation() {
+  window.clearTimeout(automationTimer);
+  if (!gameStarted || searchBusy || !state || state.gameOver) {
     return;
   }
+  if (state.botPending && settings.autoAi) {
+    automationTimer = window.setTimeout(() => startSearch("move"), 180);
+    return;
+  }
+  if (state.mode === "human-human" && state.ponder && !state.search?.running) {
+    automationTimer = window.setTimeout(() => startSearch("analysis"), 260);
+  }
+}
+
+async function startNewGame(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  if (searchBusy) {
+    return;
+  }
+
   selected = [];
+  gameStarted = true;
+  settings.autoAi = els.setupAutoAiToggle.checked;
+  els.autoAiToggle.checked = settings.autoAi;
   try {
-    setBusy(true, "Starting new game.");
-    const nextState = await postJson("/api/new", {
-      humanColor: els.humanColorSelect.value,
-      firstColor: els.firstColorSelect.value,
-      botDepth: Number(els.depthSlider.value),
-      botEnabled: els.modeSelect.value === "bot",
-      autoBot: settings.autoBot
-    });
+    const nextState = await postJson("/api/new", setupPayload());
+    els.setupOverlay.classList.add("hidden");
     applyState(nextState);
     centerPieces(false);
   } catch (error) {
     showToast(error.message);
-  } finally {
-    setBusy(false);
   }
 }
 
 async function applyOptions() {
-  if (busy) {
+  if (searchBusy) {
     return;
   }
   try {
-    setBusy(true, "Applying options.");
-    const nextState = await postJson("/api/options", {
-      humanColor: els.humanColorSelect.value,
-      firstColor: els.firstColorSelect.value,
-      botDepth: Number(els.depthSlider.value),
-      botEnabled: els.modeSelect.value === "bot"
-    });
-    applyState(nextState);
+    applyState(await postJson("/api/options", setupPayload()));
   } catch (error) {
     showToast(error.message);
-  } finally {
-    setBusy(false);
   }
 }
 
 async function undo(steps) {
-  if (busy) {
+  if (searchBusy) {
     return;
   }
   try {
-    setBusy(true, "Rewinding.");
     selected = [];
     applyState(await postJson("/api/undo", { steps }));
   } catch (error) {
     showToast(error.message);
-  } finally {
-    setBusy(false);
   }
 }
 
 async function redo() {
-  if (busy) {
+  if (searchBusy) {
     return;
   }
   try {
-    setBusy(true, "Replaying.");
     selected = [];
     applyState(await postJson("/api/redo"));
   } catch (error) {
     showToast(error.message);
-  } finally {
-    setBusy(false);
   }
 }
 
@@ -792,8 +802,7 @@ canvas.addEventListener("wheel", (event) => {
   const rect = canvas.getBoundingClientRect();
   const sx = event.clientX - rect.left;
   const sy = event.clientY - rect.top;
-  const oldScale = view.scale;
-  const oldSize = settings.hexSize * oldScale;
+  const oldSize = settings.hexSize * view.scale;
   const worldX = (sx - canvas.clientWidth / 2 - view.panX) / oldSize;
   const worldY = (sy - canvas.clientHeight / 2 - view.panY) / oldSize;
 
@@ -807,60 +816,63 @@ canvas.addEventListener("wheel", (event) => {
 
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
+els.setupForm.addEventListener("submit", startNewGame);
+els.setupMode.addEventListener("change", syncSetupFields);
+els.newGameButton.addEventListener("click", () => {
+  syncSetupFromState();
+  els.setupOverlay.classList.remove("hidden");
+});
+els.botButton.addEventListener("click", () => startSearch("move"));
+els.analyzeButton.addEventListener("click", () => startSearch("analysis"));
 els.commitButton.addEventListener("click", submitMove);
 els.clearSelectionButton.addEventListener("click", () => {
   selected = [];
   syncControls();
   draw();
 });
-els.botButton.addEventListener("click", runBotMove);
-els.newGameButton.addEventListener("click", newGame);
-els.playButton.addEventListener("click", newGame);
-els.applyOptionsButton.addEventListener("click", applyOptions);
 els.undoButton.addEventListener("click", () => undo(1));
-els.undoRoundButton.addEventListener("click", () => undo(state && state.botEnabled ? 2 : 1));
+els.undoRoundButton.addEventListener("click", () => undo(state && state.mode === "human-ai" ? 2 : 1));
 els.redoButton.addEventListener("click", redo);
 els.resetViewButton.addEventListener("click", resetView);
 els.centerPiecesButton.addEventListener("click", () => centerPieces(true));
 
-els.depthSlider.addEventListener("input", () => {
-  els.depthValue.textContent = els.depthSlider.value;
+els.blueDepthInput.addEventListener("input", () => {
+  els.blueDepthValue.textContent = els.blueDepthInput.value;
 });
-
+els.orangeDepthInput.addEventListener("input", () => {
+  els.orangeDepthValue.textContent = els.orangeDepthInput.value;
+});
 els.sizeSlider.addEventListener("input", () => {
   settings.hexSize = Number(els.sizeSlider.value);
   els.sizeValue.textContent = settings.hexSize;
   draw();
 });
-
 els.coordsToggle.addEventListener("change", () => {
   settings.showCoords = els.coordsToggle.checked;
   draw();
 });
-
-els.hintsToggle.addEventListener("change", () => {
-  settings.showHints = els.hintsToggle.checked;
+els.frontierToggle.addEventListener("change", () => {
+  settings.showFrontier = els.frontierToggle.checked;
   draw();
 });
-
 els.heatToggle.addEventListener("change", () => {
   settings.showHeat = els.heatToggle.checked;
   draw();
 });
-
 els.latestToggle.addEventListener("change", () => {
   settings.showLatest = els.latestToggle.checked;
   draw();
 });
-
 els.autoSubmitToggle.addEventListener("change", () => {
   settings.autoSubmit = els.autoSubmitToggle.checked;
 });
-
-els.autoBotToggle.addEventListener("change", () => {
-  settings.autoBot = els.autoBotToggle.checked;
+els.autoAiToggle.addEventListener("change", () => {
+  settings.autoAi = els.autoAiToggle.checked;
+  els.setupAutoAiToggle.checked = settings.autoAi;
+  scheduleAutomation();
 });
 
 window.addEventListener("resize", resizeCanvas);
+syncSetupFields();
 resizeCanvas();
-loadState();
+loadState().then(syncSetupFromState);
